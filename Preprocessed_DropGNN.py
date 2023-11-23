@@ -32,7 +32,7 @@ def get_dataset(args):
                 data.x = F.one_hot(data.x, num_classes=69).to(torch.float)
                 return data
 
-        path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', f'{args.dataset}')
+        path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', f'{ args.dataset}')
         dataset = TUDataset(
             path,
             name=args.dataset,
