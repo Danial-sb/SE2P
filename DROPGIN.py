@@ -51,6 +51,15 @@ def main(args, cluster=None):
 
         path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', 'PROTEINS')
         dataset = TUDataset(path, name='PROTEINS', pre_filter=MyFilter())
+
+    elif 'ENZYMES' in args.dataset:
+        class MyFilter(object):
+            def __call__(self, data):
+                return data.num_nodes < 95
+
+        path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', 'ENZYMES')
+        dataset = TUDataset(path, name='ENZYMES', pre_filter=MyFilter())
+
     else:
         raise ValueError
 
@@ -85,6 +94,141 @@ def main(args, cluster=None):
         for idx in skf.split(np.zeros(dataset_len), np.zeros(dataset_len)):
             idx_list.append(idx)
         return idx_list
+
+    class CustomGCNConv(nn.Module):
+        def __init__(self, input_dim, output_dim):
+            super(CustomGCNConv, self).__init__()
+            self.linear_1 = nn.Linear(input_dim, output_dim)
+            self.bn = nn.BatchNorm1d(output_dim)
+            self.relu = nn.ReLU()
+            self.linear_2 = nn.Linear(output_dim, output_dim)
+            self.gcnconv = GCNConv(output_dim, output_dim)  # Using GCNConv with specified dimensions
+
+        def forward(self, x, edge_index):
+            x = self.linear_1(x)
+            x = self.bn(x)
+            x = self.relu(x)
+            x = self.linear_2(x)
+            x = self.gcnconv(x, edge_index)
+            return x
+
+    class GCN(nn.Module):
+        def __init__(self):
+            super(GCN, self).__init__()
+
+            num_features = dataset.num_features
+            dim = args.hidden_units
+            self.dropout = args.dropout
+
+            self.num_layers = 4
+
+            self.convs = nn.ModuleList()
+            self.bns = nn.ModuleList()
+            self.fcs = nn.ModuleList()
+
+            self.convs.append(CustomGCNConv(num_features, dim))
+            self.bns.append(nn.BatchNorm1d(dim))
+            self.fcs.append(nn.Linear(num_features, dataset.num_classes))
+            self.fcs.append(nn.Linear(dim, dataset.num_classes))
+
+            for i in range(self.num_layers - 1):
+                self.convs.append(CustomGCNConv(dim, dim))
+                self.bns.append(nn.BatchNorm1d(dim))
+                self.fcs.append(nn.Linear(dim, dataset.num_classes))
+
+        def reset_parameters(self):
+            for m in self.modules():
+                if isinstance(m, nn.Linear) or isinstance(m, GCNConv):
+                    m.reset_parameters()
+                elif isinstance(m, nn.BatchNorm1d):
+                    m.reset_parameters()
+
+        def forward(self, data):
+            x = data.x
+            edge_index = data.edge_index
+            batch = data.batch
+            outs = [x]
+            for i in range(self.num_layers):
+                x = self.convs[i](x, edge_index)
+                x = self.bns[i](x)
+                x = F.relu(x)
+                outs.append(x)
+
+            out = None
+            for i, x in enumerate(outs):
+                x = global_add_pool(x, batch)
+                x = F.dropout(self.fcs[i](x), p=self.dropout, training=self.training)
+                if out is None:
+                    out = x
+                else:
+                    out += x
+            return F.log_softmax(out, dim=-1)
+
+    class DropGCN(nn.Module):
+        def __init__(self):
+            super(DropGCN, self).__init__()
+
+            num_features = dataset.num_features
+            dim = args.hidden_units
+            self.dropout = args.dropout
+
+            self.num_layers = 4
+
+            self.convs = nn.ModuleList()
+            self.bns = nn.ModuleList()
+            self.fcs = nn.ModuleList()
+
+            self.convs.append(CustomGCNConv(num_features, dim))
+            self.bns.append(nn.BatchNorm1d(dim))
+            self.fcs.append(nn.Linear(num_features, dataset.num_classes))
+            self.fcs.append(nn.Linear(dim, dataset.num_classes))
+
+            for i in range(self.num_layers - 1):
+                self.convs.append(CustomGCNConv(dim, dim))
+                self.bns.append(nn.BatchNorm1d(dim))
+                self.fcs.append(nn.Linear(dim, dataset.num_classes))
+
+        def reset_parameters(self):
+            for m in self.modules():
+                if isinstance(m, nn.Linear):
+                    m.reset_parameters()
+                elif isinstance(m, GCNConv):
+                    m.reset_parameters()
+                elif isinstance(m, nn.BatchNorm1d):
+                    m.reset_parameters()
+
+        def forward(self, data):
+            x = data.x
+            edge_index = data.edge_index
+            batch = data.batch
+
+            # Do runs in paralel, by repeating the graphs in the batch
+            x = x.unsqueeze(0).expand(num_runs, -1, -1).clone()
+            drop = torch.bernoulli(torch.ones([x.size(0), x.size(1)], device=x.device) * p).bool()
+            x[drop] = torch.zeros([drop.sum().long().item(), x.size(-1)], device=x.device)
+            del drop
+            outs = [x]
+            x = x.view(-1, x.size(-1))
+            run_edge_index = edge_index.repeat(1, num_runs) + torch.arange(num_runs,
+                                                                           device=edge_index.device).repeat_interleave(
+                edge_index.size(1)) * (edge_index.max() + 1)
+            for i in range(self.num_layers):
+                x = self.convs[i](x, run_edge_index)
+                x = self.bns[i](x)
+                x = F.relu(x)
+                outs.append(x.view(num_runs, -1, x.size(-1)))
+            del run_edge_index
+            out = None
+            for i, x in enumerate(outs):
+                x = x.mean(dim=0)
+                x = global_add_pool(x, batch)
+                x = F.dropout(self.fcs[i](x), p=self.dropout, training=self.training)
+                if out is None:
+                    out = x
+                else:
+                    out += x
+
+            return F.log_softmax(out, dim=-1)
 
     class GIN(nn.Module):
         def __init__(self):
@@ -233,15 +377,20 @@ def main(args, cluster=None):
             out = model(data)
             pred = out.argmax(dim=1)
             correct += int((pred == data.y).sum())
-        return correct / len(loader.dataset)
+        return correct / len(loader.dataset) * 100
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Device: {device}')
-    seeds_to_test = [0, 64, 1234]
+    seeds_to_test = [0, 42]
     n_splits = 10
     # test_acc_lists = []
     final_acc = []
     final_std = []
+    time_fold = []
+
+    def count_parameters(model):
+        return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
 
     for seed in seeds_to_test:
         print(f'Seed: {seed}')
@@ -255,7 +404,7 @@ def main(args, cluster=None):
         # Iterate through each fold
         for fold, (train_indices, test_indices) in enumerate(kf.split(dataset)):
             print(f'Fold {fold + 1}/{n_splits}:')
-
+            start_time_fold = time.time()
             # Create data loaders for the current fold
             train_loader = DataLoader(
                 dataset[train_indices],
@@ -270,6 +419,10 @@ def main(args, cluster=None):
             # Reinitialize the model for each fold
             if args.model == "DropGIN":
                 model = DropGIN().to(device)
+            elif args.model == "GCN":
+                model = GCN().to(device)
+            elif args.model == "DropGCN":
+                model = DropGCN().to(device)
             else:
                 model = GIN().to(device)
             optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
@@ -304,10 +457,15 @@ def main(args, cluster=None):
                     print("===============================")
                     break
 
+            end_time_fold = time.time()
+            elapsed_time_fold = end_time_fold - start_time_fold
+            print(f'Time taken for training in seed {seed}, fold {fold + 1}: {elapsed_time_fold:.2f} seconds')
+            time_fold.append(elapsed_time_fold)
             # Store the results for the current fold
             best_acc_list.append(best_acc)
             # test_acc_lists.append(test_acc_list)
-
+        print(f'Average training time in seed {seed}: {np.mean(time_fold)}')
+        print(f'STD training time in seed {seed}: {np.std(time_fold)}')
         # Calculate and report the mean and standard deviation of the best accuracies
         mean_best_acc = np.mean(best_acc_list)
         std_best_acc = np.std(best_acc_list)
@@ -322,23 +480,22 @@ def main(args, cluster=None):
     print(f'Test accuracy for all the seeds: {np.mean(final_acc)}')
     print(f'Std for all the seeds: {np.mean(final_std)}')
 
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--dataset', type=str, choices=['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES'], default='ENZYMES',
+                        help="Options are ['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS']")
+    parser.add_argument('--batch_size', type=int, default=64, help='batch size')
+    parser.add_argument('--seed', type=int, default=1234, help='seed for reproducibility')
+    parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
+    parser.add_argument('--model', type=str, choices=['GIN', 'DropGIN', 'GCN', 'DropGCN'], default="DropGIN")
+    parser.add_argument('--hidden_units', type=int, default=64, choices=[16, 32])
+    parser.add_argument('--dropout', type=float, choices=[0.5, 0.2], default=0.2, help='dropout probability')
+    parser.add_argument('--epochs', type=int, default=200, help='maximum number of epochs')
+    parser.add_argument('--min_delta', type=float, default=0.001, help='min_delta in early stopping')
+    parser.add_argument('--patience', type=int, default=100, help='patience in early stopping')
 
-# if __name__ == '__main__':
-#     parser = argparse.ArgumentParser()
-#     parser.add_argument('--dataset', type=str, choices=['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI'], default='MUTAG',
-#                         help="Options are ['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI']")
-#     parser.add_argument('--batch_size', type=int, default=32, help='batch size')
-#     parser.add_argument('--seed', type=int, default=1234, help='seed for reproducibility')
-#     parser.add_argument('--lr', type=float, default=0.01, help='learning rate')
-#     parser.add_argument('--model', type=str, choices=['GCN', 'DropGIN'], default="DropGIN")
-#     parser.add_argument('--hidden_units', type=int, default=64, choices=[16, 32])
-#     parser.add_argument('--dropout', type=float, choices=[0.5, 0.2], default=0.2, help='dropout probability')
-#     parser.add_argument('--epochs', type=int, default=200, help='maximum number of epochs')
-#     parser.add_argument('--min_delta', type=float, default=0.001, help='min_delta in early stopping')
-#     parser.add_argument('--patience', type=int, default=100, help='patience in early stopping')
-#
-#     args = parser.parse_args()
-#
-#     main(args)
+    args = parser.parse_args()
+    print(f"model:{args.model}")
+    main(args)
 #
 #     print('Finished', flush=True)
