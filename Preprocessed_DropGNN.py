@@ -82,6 +82,7 @@ def get_dataset(args):
         class MyFilter(object):
             def __call__(self, data):
                 return True
+
         path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', 'PTC_GIN')
         dataset = PTCDataset(path, name='PTC')
     else:
@@ -89,13 +90,15 @@ def get_dataset(args):
 
     return dataset
 
+
 def separate_data(dataset_len, seed):
     # Use same splitting/10-fold as GIN paper
-    skf = StratifiedKFold(n_splits=10, shuffle = True, random_state = seed)
+    skf = StratifiedKFold(n_splits=10, shuffle=True, random_state=seed)
     idx_list = []
     for idx in skf.split(np.zeros(dataset_len), np.zeros(dataset_len)):
         idx_list.append(idx)
     return idx_list
+
 
 def get_adj(edge_index):
     adj = to_dense_adj(edge_index).squeeze()
@@ -105,7 +108,7 @@ def get_adj(edge_index):
 
 
 def compute_symmetric_normalized_adj(edge_index):
-    # Convert to dense adjacency matrix
+    #  Convert to dense adjacency matrix
     adj = to_dense_adj(edge_index).squeeze()
     identity_matrix = torch.eye(adj.shape[0])
     adj_with_self_loops = adj + identity_matrix
@@ -122,8 +125,7 @@ def compute_symmetric_normalized_adj(edge_index):
 
 
 def generate_perturbation(adj, p):
-    all_adj = []
-    all_adj.append(adj[0].clone())
+    all_adj = [adj[0].clone()]
     adj_perturbation = adj.clone()  # Make a copy of the original adjacency matrix for this perturbation
 
     for perturbation in range(1, adj.size(0)):  # Loop over perturbations
@@ -162,7 +164,7 @@ def compute_symmetric_normalized_perturbed_adj(adj_perturbed):  # This is for do
     return all_normalized_adj
 
 
-def diffusion(adj_perturbed, feature_matrix, k):
+def diffusion(adj_perturbed, feature_matrix, k):  # change this for algorithm 1
     enriched_feature_matrices = []
     for perturbation in range(adj_perturbed.size(0)):
         # Get the adjacency matrix for this perturbation
@@ -187,35 +189,48 @@ def diffusion(adj_perturbed, feature_matrix, k):
 
 
 class EnrichedGraphDataset(Dataset):
-    def __init__(self, root, dataset, k, p, num_perturbations):
+    def __init__(self, root, dataset, k, p, num_perturbations, args):
         super(EnrichedGraphDataset, self).__init__(root, transform=None, pre_transform=None)
         self.k = k
         self.p = p
         self.num_perturbations = num_perturbations
-        self.data_list = self.process_dataset(dataset)
+        self.data_list = self.process_dataset(dataset, args)
 
-    def process_dataset(self, dataset):
+    def process_dataset(self, dataset, args):
         # dataset = TUDataset(self.root, name)
         enriched_dataset = []
+        feature_matrices_of_perts = None
+        final_feature_of_graph = None
 
         for data in dataset:
             edge_index = data.edge_index
             feature_matrix = data.x.clone()
 
-            # normalized_adj = compute_symmetric_normalized_adj(edge_index)
-            adjacency = get_adj(edge_index)  # get adj with self-loops, for doing normalization after
-            adj = adjacency.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
-            perturbed_adj = generate_perturbation(adj, self.p)
-            normalized_adj = compute_symmetric_normalized_perturbed_adj(perturbed_adj)
-            if torch.isnan(normalized_adj).any():
-                raise ValueError("NaN values encountered in normalized adjacency matrices.")
+            if args.normalization == "Before":
+                normalized_adj = compute_symmetric_normalized_adj(edge_index)
+                perturbed_adj = generate_perturbation(normalized_adj, self.p)
+                feature_matrices_of_perts = diffusion(perturbed_adj, feature_matrix, self.k)
 
-            feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, self.k)
-            final_feature_of_graph = feature_matrices_of_perts.mean(dim=0).clone()  # This is for mean aggregation
-            # final_feature_of_graph = feature_matrices_of_perts.view(-1, feature_matrices_of_perts.size(-1)).clone() # This is for concat aggregation
+            elif args.normalization == "After":
+                adjacency = get_adj(edge_index)
+                adj = adjacency.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
+                perturbed_adj = generate_perturbation(adj, self.p)
+                normalized_adj = compute_symmetric_normalized_perturbed_adj(perturbed_adj)
+                if torch.isnan(normalized_adj).any():
+                    raise ValueError("NaN values encountered in normalized adjacency matrices.")
+                feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, self.k)
 
-            enriched_data = Data(x=final_feature_of_graph, edge_index=edge_index, y=data.y)
-            enriched_dataset.append(enriched_data)
+            if args.agg == "mean":
+                final_feature_of_graph = feature_matrices_of_perts.mean(dim=0).clone()
+
+            elif args.agg == "concat":
+                final_feature_of_graph = feature_matrices_of_perts.view(-1, feature_matrices_of_perts.size(-1)).clone()
+
+            if final_feature_of_graph is not None:
+                enriched_data = Data(x=final_feature_of_graph, edge_index=edge_index, y=data.y)
+                enriched_dataset.append(enriched_data)
+            else:
+                raise ValueError("No aggregation method specified.")
 
         return enriched_dataset
 
@@ -235,8 +250,8 @@ class DropGNN_V2(nn.Module):
         self.activation = nn.ELU()
         self.linear2 = nn.Linear(hidden_dim, hidden_dim)
         self.bn2 = nn.BatchNorm1d(hidden_dim)
-        self.linear3 = nn.Linear(hidden_dim, hidden_dim//2)
-        self.linear4 = nn.Linear(hidden_dim//2, output_dim)
+        self.linear3 = nn.Linear(hidden_dim, hidden_dim // 2)
+        self.linear4 = nn.Linear(hidden_dim // 2, output_dim)
         self.dropout = dropout
 
         self.reset_parameters()
@@ -276,6 +291,7 @@ class DropGNN_V2(nn.Module):
         # print(f'x after linear 3: {x.shape}')
         return F.log_softmax(x, dim=-1)
 
+
 def train(model, loader, optimizer, device):
     model.train()
     loss_all = 0
@@ -310,8 +326,8 @@ def count_parameters(model):
 
 def main(config=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', type=str, choices=['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES', 'PTC_GIN'],
-                        default='MUTAG',
+    parser.add_argument('--dataset', type=str, choices=['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES',
+                                                        'PTC_GIN'], default='MUTAG',
                         help="Options are ['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES', 'PTC_GIN']")
     # parser.add_argument('--batch_size', type=int, default=32, help='batch size')
     parser.add_argument('--seed', type=int, default=1234, help='seed for reproducibility')
@@ -320,6 +336,10 @@ def main(config=None):
     parser.add_argument('--epochs', type=int, default=200, help='maximum number of epochs')
     parser.add_argument('--min_delta', type=float, default=0.001, help='min_delta in early stopping')
     parser.add_argument('--patience', type=int, default=100, help='patience in early stopping')
+    parser.add_argument('--agg', type=str, default="mean", choices=["mean", "concat"],
+                        help='Method for aggregating the perturbation')
+    parser.add_argument('--normalization', type=str, default='After', choices=['After', 'Before'],
+                        help='Doing normalization before generation of perturbations or after')
     args = parser.parse_args()
     wandb.login()
     dataset = get_dataset(args)
@@ -349,57 +369,54 @@ def main(config=None):
 
     start_time = time.time()
     enriched_dataset = EnrichedGraphDataset(os.path.join(current_path, 'enriched_dataset'), dataset, k=4, p=p,
-                                            num_perturbations=num_perturbations)
+                                            num_perturbations=num_perturbations, args=args)
     end_time = time.time()
     elapsed_time = end_time - start_time
     print(f"Time taken: {elapsed_time:.2f} seconds")
 
     with wandb.init(config=config):
         config = wandb.config
-        seeds_to_test = [0, 42]
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        print(f'Device: {device}')
+        seeds_to_test = [0, 64]
         n_splits = 10
         final_acc = []
         final_std = []
-        time_seed = []
-        time_fold = []
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        print(device)
 
         for seed in seeds_to_test:
-            start_time_seed = time.time()
             print(f'Seed: {seed}')
             print("==============")
             torch.manual_seed(seed)
             np.random.seed(seed)
+            all_validation_accuracies = []
+            time_seed = []
 
-            kf = KFold(n_splits=n_splits, shuffle=True, random_state=seed)
-            best_acc_list = []
+            skf_splits = separate_data(len(dataset), seed)
 
             # Iterate through each fold
-            for fold, (train_indices, test_indices) in enumerate(kf.split(enriched_dataset)):
+            for fold, (train_indices, test_indices) in enumerate(skf_splits):
                 print(f'Fold {fold + 1}/{n_splits}:')
                 start_time_fold = time.time()
                 # Create data loaders for the current fold
                 train_loader = DataLoader(
-                    enriched_dataset[train_indices],
-                    sampler=RandomSampler(enriched_dataset[train_indices], replacement=True,
+                    dataset[train_indices],
+                    sampler=RandomSampler(dataset[train_indices], replacement=True,
                                           num_samples=int(
                                               len(train_indices) * 50 / (len(train_indices) / config.batch_size))),
                     batch_size=config.batch_size, drop_last=False,
                     collate_fn=Collater(follow_batch=[], exclude_keys=[]))
 
-                test_loader = DataLoader(enriched_dataset[test_indices], batch_size=config.batch_size, shuffle=False)
+                test_loader = DataLoader(dataset[test_indices], batch_size=config.batch_size, shuffle=False)
 
                 # Reinitialize the model for each fold
                 model = DropGNN_V2(enriched_dataset.num_features, config.hidden_dim, enriched_dataset.num_classes,
                                    config.dropout).to(device)
-                print(f"Number of trainable parameters: {count_parameters(model)}")
+                if fold == 0:
+                    print(f'Model learnable parameters: {count_parameters(model)}')
                 optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
                 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.5)
-                best_acc = 0
-                # test_acc_list = []
-                counter = 0
 
+                validation_accuracies = []
                 # Training loop for the current fold
                 for epoch in range(1, args.epochs + 1):
                     lr = scheduler.optimizer.param_groups[0]['lr']
@@ -408,55 +425,35 @@ def main(config=None):
                     test_acc = test(model, test_loader, device)
                     if epoch % 20 == 0:
                         print(f'Epoch: {epoch:02d} | TrainLoss: {train_loss:.3f} | Test_acc: {test_acc:.3f}')
-                        wandb.log({"Train Loss": train_loss, "Test Accuracy": test_acc})
-                    # test_acc_list.append(test_acc)
+                    validation_accuracies.append(test_acc)
 
-                    current_acc = test_acc
-
-                    if current_acc > best_acc + args.min_delta:
-                        best_acc = current_acc
-                        # best_model = copy.deepcopy(model.state_dict())
-                        counter = 0
-                    else:
-                        counter += 1
-
-                    if counter >= args.patience:
-                        print(
-                            f"Validation performance did not improve by at least {args.min_delta:.3f} for {args.patience} epochs. Stopping training...")
-                        print(f"Best validation accuracy: {best_acc:.3f}")
-                        print("===============================")
-                        break
-
-                # Store the results for the current fold
+                all_validation_accuracies.append(validation_accuracies)
+                # Print fold training time
                 end_time_fold = time.time()
                 elapsed_time_fold = end_time_fold - start_time_fold
                 print(f'Time taken for training in seed {seed}, fold {fold + 1}: {elapsed_time_fold:.2f} seconds')
-                time_fold.append(elapsed_time_fold)
-                best_acc_list.append(best_acc)
-                # test_acc_lists.append(test_acc_list)
-            print(f'Average training time in seed {seed}: {np.mean(time_fold)}')
-            print(f'STD training time in seed {seed}: {np.std(time_fold)}')
-            end_time_seed = time.time()
-            elapsed_time_seed = end_time_seed - start_time_seed
-            time_seed.append(elapsed_time_seed)
-            print(f'Time taken for training with seed {seed}: {elapsed_time_seed:.2f} seconds')
-            # Calculate and report the mean and standard deviation of the best accuracies
-            mean_best_acc = np.mean(best_acc_list)
-            std_best_acc = np.std(best_acc_list)
+                time_seed.append(elapsed_time_fold)
+            print("======================================")
+            average_validation_curve = np.mean(all_validation_accuracies, axis=0)
+            max_avg_validation_acc_epoch = np.argmax(average_validation_curve)
+            best_epoch_mean = average_validation_curve[max_avg_validation_acc_epoch]
+            std_at_max_avg_validation_acc_epoch = np.std(
+                [validation_accuracies[max_avg_validation_acc_epoch] for validation_accuracies in
+                 all_validation_accuracies])
 
-            final_acc.append(mean_best_acc)
-            final_std.append(std_best_acc)
+            final_acc.append(best_epoch_mean)
+            final_std.append(std_at_max_avg_validation_acc_epoch)
 
-            print(f'Mean Best Accuracy for seed {seed}: {mean_best_acc}')
-            print(f'Standard Deviation for seed {seed}: {std_best_acc}')
+            print(
+                f'Epoch {max_avg_validation_acc_epoch + 1} got maximum averaged validation accuracy in seed {seed}: {best_epoch_mean}')
+            print(f'Standard Deviation for the results of epoch {max_avg_validation_acc_epoch + 1} over all the folds '
+                  f'in seed {seed}: {std_at_max_avg_validation_acc_epoch}')
+            print(f'Average time taken for each fold in seed {seed}: {np.mean(time_seed)}')
 
         print("======================================")
         print(f'Test accuracy for all the seeds: {np.mean(final_acc)}')
         print(f'Std for all the seeds: {np.mean(final_std)}')
-        print(f'Average training time for all the seeds: {np.mean(time_seed)}')
-        print(f'STD time for all the seeds: {np.std(time_seed)}')
-        wandb.log({"Test accuracy for all the seeds:": np.mean(final_acc)})
 
 
 if __name__ == "__main__":
-    wandb.agent(sweep_id, main, count=5)
+    wandb.agent(sweep_id, main, count=1)

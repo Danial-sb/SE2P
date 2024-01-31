@@ -381,28 +381,26 @@ def main(args, cluster=None):
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Device: {device}')
-    seeds_to_test = [0, 42]
+    seeds_to_test = [0, 64]
     n_splits = 10
-    # test_acc_lists = []
     final_acc = []
     final_std = []
-    time_fold = []
 
     def count_parameters(model):
         return sum(p.numel() for p in model.parameters() if p.requires_grad)
-
 
     for seed in seeds_to_test:
         print(f'Seed: {seed}')
         print("==============")
         torch.manual_seed(seed)
         np.random.seed(seed)
+        all_validation_accuracies = []
+        time_seed = []
 
-        kf = KFold(n_splits=n_splits, shuffle=True, random_state=seed)
-        best_acc_list = []
+        skf_splits = separate_data(len(dataset), seed)
 
         # Iterate through each fold
-        for fold, (train_indices, test_indices) in enumerate(kf.split(dataset)):
+        for fold, (train_indices, test_indices) in enumerate(skf_splits):
             print(f'Fold {fold + 1}/{n_splits}:')
             start_time_fold = time.time()
             # Create data loaders for the current fold
@@ -425,70 +423,60 @@ def main(args, cluster=None):
                 model = DropGCN().to(device)
             else:
                 model = GIN().to(device)
-            optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-            # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.5)
-            best_acc = 0
-            # test_acc_list = []
-            counter = 0
 
+            if fold == 0:
+                print(f'Model Parameters: {count_parameters(model)}')
+
+            optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+            scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.5)
+            validation_accuracies = []
             # Training loop for the current fold
             for epoch in range(1, args.epochs + 1):
-                # lr = scheduler.optimizer.param_groups[0]['lr']
+                lr = scheduler.optimizer.param_groups[0]['lr']
                 train_loss = train(model, train_loader, optimizer, device)
-                # scheduler.step()
+                scheduler.step()
                 test_acc = test(model, test_loader, device)
                 if epoch % 20 == 0:
                     print(f'Epoch: {epoch:02d} | TrainLoss: {train_loss:.3f} | Test_acc: {test_acc:.3f}')
-                # test_acc_list.append(test_acc)
+                validation_accuracies.append(test_acc)
 
-                current_acc = test_acc
-
-                if current_acc > best_acc + args.min_delta:
-                    best_acc = current_acc
-                    # best_model = copy.deepcopy(model.state_dict())
-                    counter = 0
-                else:
-                    counter += 1
-
-                if counter >= args.patience:
-                    print(
-                        f"Validation performance did not improve by at least {args.min_delta:.3f} for {args.patience} epochs. Stopping training...")
-                    print(f"Best validation accuracy: {best_acc:.3f}")
-                    print("===============================")
-                    break
-
+            all_validation_accuracies.append(validation_accuracies)
+            # Print fold training time
             end_time_fold = time.time()
             elapsed_time_fold = end_time_fold - start_time_fold
             print(f'Time taken for training in seed {seed}, fold {fold + 1}: {elapsed_time_fold:.2f} seconds')
-            time_fold.append(elapsed_time_fold)
-            # Store the results for the current fold
-            best_acc_list.append(best_acc)
-            # test_acc_lists.append(test_acc_list)
-        print(f'Average training time in seed {seed}: {np.mean(time_fold)}')
-        print(f'STD training time in seed {seed}: {np.std(time_fold)}')
-        # Calculate and report the mean and standard deviation of the best accuracies
-        mean_best_acc = np.mean(best_acc_list)
-        std_best_acc = np.std(best_acc_list)
+            time_seed.append(elapsed_time_fold)
+        print("======================================")
+        average_validation_curve = np.mean(all_validation_accuracies, axis=0)
+        max_avg_validation_acc_epoch = np.argmax(average_validation_curve)
+        best_epoch_mean = average_validation_curve[max_avg_validation_acc_epoch]
+        std_at_max_avg_validation_acc_epoch = np.std(
+            [validation_accuracies[max_avg_validation_acc_epoch] for validation_accuracies in
+             all_validation_accuracies])
 
-        final_acc.append(mean_best_acc)
-        final_std.append(std_best_acc)
+        final_acc.append(best_epoch_mean)
+        final_std.append(std_at_max_avg_validation_acc_epoch)
 
-        print(f'Mean Best Accuracy for seed {seed}: {mean_best_acc}')
-        print(f'Standard Deviation for seed {seed}: {std_best_acc}')
+        print(
+            f'Epoch {max_avg_validation_acc_epoch + 1} got maximum averaged validation accuracy in seed {seed}: {best_epoch_mean}')
+        print(f'Standard Deviation for the results of epoch {max_avg_validation_acc_epoch + 1} over all the folds in '
+              f'seed {seed}: {std_at_max_avg_validation_acc_epoch}')
+        print(f'Average time taken for each fold in seed {seed}: {np.mean(time_seed)}')
 
     print("======================================")
     print(f'Test accuracy for all the seeds: {np.mean(final_acc)}')
     print(f'Std for all the seeds: {np.mean(final_std)}')
 
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', type=str, choices=['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES'], default='ENZYMES',
-                        help="Options are ['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS']")
+    parser.add_argument('--dataset', type=str, choices=['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES'],
+                        default='MUTAG', help="Options are ['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS']")
     parser.add_argument('--batch_size', type=int, default=64, help='batch size')
     parser.add_argument('--seed', type=int, default=1234, help='seed for reproducibility')
     parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
-    parser.add_argument('--model', type=str, choices=['GIN', 'DropGIN', 'GCN', 'DropGCN'], default="DropGIN")
-    parser.add_argument('--hidden_units', type=int, default=64, choices=[16, 32])
+    parser.add_argument('--model', type=str, choices=['GIN', 'DropGIN', 'GCN', 'DropGCN'], default="GIN")
+    parser.add_argument('--hidden_units', type=int, default=32, choices=[64, 32])
     parser.add_argument('--dropout', type=float, choices=[0.5, 0.2], default=0.2, help='dropout probability')
     parser.add_argument('--epochs', type=int, default=200, help='maximum number of epochs')
     parser.add_argument('--min_delta', type=float, default=0.001, help='min_delta in early stopping')
@@ -497,5 +485,5 @@ if __name__ == '__main__':
     args = parser.parse_args()
     print(f"model:{args.model}")
     main(args)
-#
-#     print('Finished', flush=True)
+
+    print('Finished', flush=True)
