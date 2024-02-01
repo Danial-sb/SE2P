@@ -24,12 +24,13 @@ from ptc_dataset import PTCDataset
 
 sweep_config = {
     "method": "random",
-    "metric": {"name": "accuracy", "goal": "maximize"},
+    "metric": {"name": "final_acc", "goal": "maximize"},
     "parameters": {
         "lr": {"values": [0.001, 0.01]},
         "batch_size": {"values": [64, 32]},
         "dropout": {"values": [0.1, 0.2, 0.5]},
-        "hidden_dim": {"values": [64, 32, 128]}
+        "normalization": {"values": ["Before", "After"]},
+        "hidden_dim": {"values": [16, 32, 64, 128]}
     }
 }
 sweep_id = wandb.sweep(sweep_config, project="SDGNN")
@@ -189,14 +190,14 @@ def diffusion(adj_perturbed, feature_matrix, k):  # change this for algorithm 1
 
 
 class EnrichedGraphDataset(Dataset):
-    def __init__(self, root, dataset, k, p, num_perturbations, args):
+    def __init__(self, root, dataset, k, p, num_perturbations, config, args):
         super(EnrichedGraphDataset, self).__init__(root, transform=None, pre_transform=None)
         self.k = k
         self.p = p
         self.num_perturbations = num_perturbations
-        self.data_list = self.process_dataset(dataset, args)
+        self.data_list = self.process_dataset(dataset, config, args)
 
-    def process_dataset(self, dataset, args):
+    def process_dataset(self, dataset, config, args):
         # dataset = TUDataset(self.root, name)
         enriched_dataset = []
         feature_matrices_of_perts = None
@@ -206,12 +207,12 @@ class EnrichedGraphDataset(Dataset):
             edge_index = data.edge_index
             feature_matrix = data.x.clone()
 
-            if args.normalization == "Before":
+            if config.normalization == "Before":
                 normalized_adj = compute_symmetric_normalized_adj(edge_index)
                 perturbed_adj = generate_perturbation(normalized_adj, self.p)
                 feature_matrices_of_perts = diffusion(perturbed_adj, feature_matrix, self.k)
 
-            elif args.normalization == "After":
+            elif config.normalization == "After":
                 adjacency = get_adj(edge_index)
                 adj = adjacency.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
                 perturbed_adj = generate_perturbation(adj, self.p)
@@ -334,12 +335,12 @@ def main(config=None):
     # parser.add_argument('--lr', type=float, default=0.01, help='learning rate')
     # parser.add_argument('--dropout', type=float, choices=[0.5, 0.2], default=0.2, help='dropout probability')
     parser.add_argument('--epochs', type=int, default=200, help='maximum number of epochs')
-    parser.add_argument('--min_delta', type=float, default=0.001, help='min_delta in early stopping')
-    parser.add_argument('--patience', type=int, default=100, help='patience in early stopping')
+    # parser.add_argument('--min_delta', type=float, default=0.001, help='min_delta in early stopping')
+    # parser.add_argument('--patience', type=int, default=100, help='patience in early stopping')
     parser.add_argument('--agg', type=str, default="mean", choices=["mean", "concat"],
                         help='Method for aggregating the perturbation')
-    parser.add_argument('--normalization', type=str, default='After', choices=['After', 'Before'],
-                        help='Doing normalization before generation of perturbations or after')
+    # parser.add_argument('--normalization', type=str, default='After', choices=['After', 'Before'],
+    #                    help='Doing normalization before generation of perturbations or after')
     args = parser.parse_args()
     wandb.login()
     dataset = get_dataset(args)
@@ -367,15 +368,15 @@ def main(config=None):
     print(f'Sampling probability: {p}')
     current_path = os.getcwd()
 
-    start_time = time.time()
-    enriched_dataset = EnrichedGraphDataset(os.path.join(current_path, 'enriched_dataset'), dataset, k=4, p=p,
-                                            num_perturbations=num_perturbations, args=args)
-    end_time = time.time()
-    elapsed_time = end_time - start_time
-    print(f"Time taken: {elapsed_time:.2f} seconds")
-
     with wandb.init(config=config):
         config = wandb.config
+        start_time = time.time()
+        enriched_dataset = EnrichedGraphDataset(os.path.join(current_path, 'enriched_dataset'), dataset, k=4, p=p,
+                                                num_perturbations=num_perturbations, config=config, args=args)
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        print(f"Time taken: {elapsed_time:.2f} seconds")
+
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print(f'Device: {device}')
         seeds_to_test = [0, 64]
@@ -444,8 +445,7 @@ def main(config=None):
             final_acc.append(best_epoch_mean)
             final_std.append(std_at_max_avg_validation_acc_epoch)
 
-            print(
-                f'Epoch {max_avg_validation_acc_epoch + 1} got maximum averaged validation accuracy in seed {seed}: {best_epoch_mean}')
+            print(f'Epoch {max_avg_validation_acc_epoch + 1} got maximum averaged validation accuracy in seed {seed}: {best_epoch_mean}')
             print(f'Standard Deviation for the results of epoch {max_avg_validation_acc_epoch + 1} over all the folds '
                   f'in seed {seed}: {std_at_max_avg_validation_acc_epoch}')
             print(f'Average time taken for each fold in seed {seed}: {np.mean(time_seed)}')
@@ -453,6 +453,10 @@ def main(config=None):
         print("======================================")
         print(f'Test accuracy for all the seeds: {np.mean(final_acc)}')
         print(f'Std for all the seeds: {np.mean(final_std)}')
+        wandb.log(
+            {"Test Accuracy for all the seeds": np.mean(final_acc),
+             "Std for all the seeds": np.mean(final_std)
+             })
 
 
 if __name__ == "__main__":
