@@ -23,17 +23,18 @@ import wandb
 from ptc_dataset import PTCDataset
 
 sweep_config = {
-    "method": "random",
-    "metric": {"name": "final_acc", "goal": "maximize"},
+    "method": "bayes",
+    "metric": {"name": "final_accuracy", "goal": "maximize"},
     "parameters": {
         "lr": {"values": [0.001, 0.01]},
         "batch_size": {"values": [64, 32]},
         "dropout": {"values": [0.1, 0.2, 0.5]},
         "normalization": {"values": ["Before", "After"]},
-        "hidden_dim": {"values": [16, 32, 64, 128]}
+        "k": {"values": [2, 3, 4]},
+        "hidden_dim": {"values": [16, 32, 64]}
     }
 }
-sweep_id = wandb.sweep(sweep_config, project="SDGNN")
+sweep_id = wandb.sweep(sweep_config, project="SDGNN_MUTAG")
 
 
 def get_dataset(args):
@@ -190,9 +191,9 @@ def diffusion(adj_perturbed, feature_matrix, k):  # change this for algorithm 1
 
 
 class EnrichedGraphDataset(Dataset):
-    def __init__(self, root, dataset, k, p, num_perturbations, config, args):
+    def __init__(self, root, dataset, p, num_perturbations, config, args):
         super(EnrichedGraphDataset, self).__init__(root, transform=None, pre_transform=None)
-        self.k = k
+        # self.k = k
         self.p = p
         self.num_perturbations = num_perturbations
         self.data_list = self.process_dataset(dataset, config, args)
@@ -209,8 +210,9 @@ class EnrichedGraphDataset(Dataset):
 
             if config.normalization == "Before":
                 normalized_adj = compute_symmetric_normalized_adj(edge_index)
-                perturbed_adj = generate_perturbation(normalized_adj, self.p)
-                feature_matrices_of_perts = diffusion(perturbed_adj, feature_matrix, self.k)
+                normalized_adj_1 = normalized_adj.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
+                perturbed_adj = generate_perturbation(normalized_adj_1, self.p)
+                feature_matrices_of_perts = diffusion(perturbed_adj, feature_matrix, config.k)
 
             elif config.normalization == "After":
                 adjacency = get_adj(edge_index)
@@ -219,7 +221,7 @@ class EnrichedGraphDataset(Dataset):
                 normalized_adj = compute_symmetric_normalized_perturbed_adj(perturbed_adj)
                 if torch.isnan(normalized_adj).any():
                     raise ValueError("NaN values encountered in normalized adjacency matrices.")
-                feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, self.k)
+                feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config.k)
 
             if args.agg == "mean":
                 final_feature_of_graph = feature_matrices_of_perts.mean(dim=0).clone()
@@ -371,7 +373,7 @@ def main(config=None):
     with wandb.init(config=config):
         config = wandb.config
         start_time = time.time()
-        enriched_dataset = EnrichedGraphDataset(os.path.join(current_path, 'enriched_dataset'), dataset, k=4, p=p,
+        enriched_dataset = EnrichedGraphDataset(os.path.join(current_path, 'enriched_dataset'), dataset, p=p,
                                                 num_perturbations=num_perturbations, config=config, args=args)
         end_time = time.time()
         elapsed_time = end_time - start_time
@@ -451,13 +453,14 @@ def main(config=None):
             print(f'Average time taken for each fold in seed {seed}: {np.mean(time_seed)}')
 
         print("======================================")
-        print(f'Test accuracy for all the seeds: {np.mean(final_acc)}')
+        final_accuracy = np.mean(final_acc)
+        print(f'Test accuracy for all the seeds: {final_accuracy}')
         print(f'Std for all the seeds: {np.mean(final_std)}')
         wandb.log(
-            {"Test Accuracy for all the seeds": np.mean(final_acc),
+            {"Test Accuracy for all the seeds": final_accuracy,
              "Std for all the seeds": np.mean(final_std)
              })
 
 
 if __name__ == "__main__":
-    wandb.agent(sweep_id, main, count=1)
+    wandb.agent(sweep_id, main, count=10)
