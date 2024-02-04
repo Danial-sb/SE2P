@@ -462,6 +462,7 @@ def main(args, cluster=None):
         print(f'Standard Deviation for the results of epoch {max_avg_validation_acc_epoch + 1} over all the folds in '
               f'seed {seed}: {std_at_max_avg_validation_acc_epoch}')
         print(f'Average time taken for each fold in seed {seed}: {np.mean(time_seed)}')
+        print(f'STD time taken for each fold in seed {seed}: {np.std(time_seed)}')
 
     print("======================================")
     print(f'Test accuracy for all the seeds: {np.mean(final_acc)}')
@@ -471,13 +472,13 @@ def main(args, cluster=None):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, choices=['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES'],
-                        default='MUTAG', help="Options are ['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS']")
-    parser.add_argument('--batch_size', type=int, default=64, help='batch size')
+                        default='IMDB-BINARY', help="Options are ['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS']")
+    parser.add_argument('--batch_size', type=int, default=32, help='batch size')
     parser.add_argument('--seed', type=int, default=1234, help='seed for reproducibility')
-    parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
+    parser.add_argument('--lr', type=float, default=0.01, help='learning rate')
     parser.add_argument('--model', type=str, choices=['GIN', 'DropGIN', 'GCN', 'DropGCN'], default="GIN")
     parser.add_argument('--hidden_units', type=int, default=32, choices=[64, 32])
-    parser.add_argument('--dropout', type=float, choices=[0.5, 0.2], default=0.2, help='dropout probability')
+    parser.add_argument('--dropout', type=float, choices=[0.5, 0.2], default=0.5, help='dropout probability')
     parser.add_argument('--epochs', type=int, default=200, help='maximum number of epochs')
     parser.add_argument('--min_delta', type=float, default=0.001, help='min_delta in early stopping')
     parser.add_argument('--patience', type=int, default=100, help='patience in early stopping')
