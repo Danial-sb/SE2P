@@ -30,6 +30,7 @@ sweep_config = {
         "dropout": {"values": [0.2]},
         "normalization": {"values": ["Before"]},
         "k": {"values": [3]},
+        "sum_or_cat": {"values": ["sum"]},
         "hidden_dim": {"values": [16]}
     }
 }
@@ -165,7 +166,7 @@ def compute_symmetric_normalized_perturbed_adj(adj_perturbed):  # This is for do
     return all_normalized_adj
 
 
-def diffusion(adj_perturbed, feature_matrix, k):
+def diffusion(adj_perturbed, feature_matrix, config):
     enriched_feature_matrices = []
     for perturbation in range(adj_perturbed.size(0)):
         # Get the adjacency matrix for this perturbation
@@ -174,14 +175,17 @@ def diffusion(adj_perturbed, feature_matrix, k):
 
         internal_diffusion = [feature_matrix_for_perturbation.clone()]
         # Perform diffusion for 'k' steps
-        for _ in range(k):
+        for _ in range(config.k):
             # Multiply the adjacency matrix with the perturbed feature matrix for each step
             feature_matrix_for_perturbation = torch.matmul(adj_matrix, feature_matrix_for_perturbation)
             internal_diffusion.append(feature_matrix_for_perturbation.clone())
-        # The following two lines are for using sum in eq 1
-        # internal_diffusion = torch.stack(internal_diffusion, dim=0)
-        # internal_diffusion = torch.sum(internal_diffusion, dim=0)
-        internal_diffusion = torch.cat(internal_diffusion, dim=0)  # This is eq 1 when cat is used
+
+        if config.sum_or_cat == "sum":
+            internal_diffusion = torch.stack(internal_diffusion, dim=0)
+            internal_diffusion = torch.sum(internal_diffusion, dim=0)
+        else:
+            internal_diffusion = torch.cat(internal_diffusion, dim=0)
+
         enriched_feature_matrices.append(internal_diffusion)
 
     feature_matrices_of_perturbations = torch.stack(enriched_feature_matrices)
@@ -234,7 +238,7 @@ class EnrichedGraphDataset(Dataset):
                 feature_matrix, normalized_adj = self.pad_data(feature_matrix, adj)
                 normalized_adj_1 = normalized_adj.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
                 perturbed_adj = generate_perturbation(normalized_adj_1, self.p)
-                feature_matrices_of_perts = diffusion(perturbed_adj, feature_matrix, config.k)
+                feature_matrices_of_perts = diffusion(perturbed_adj, feature_matrix, config)
                 final_feature_of_graph = feature_matrices_of_perts
 
             elif args.agg == "deepset" and config.normalization == "After":
@@ -245,14 +249,14 @@ class EnrichedGraphDataset(Dataset):
                 normalized_adj = compute_symmetric_normalized_perturbed_adj(perturbed_adj)
                 if torch.isnan(normalized_adj).any():
                     raise ValueError("NaN values encountered in normalized adjacency matrices.")
-                feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config.k)
+                feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config)
                 final_feature_of_graph = feature_matrices_of_perts
 
             elif args.agg == "mean" and config.normalization == "Before":
                 normalized_adj = compute_symmetric_normalized_adj(edge_index)
                 normalized_adj_1 = normalized_adj.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
                 perturbed_adj = generate_perturbation(normalized_adj_1, self.p)
-                feature_matrices_of_perts = diffusion(perturbed_adj, feature_matrix, config.k)
+                feature_matrices_of_perts = diffusion(perturbed_adj, feature_matrix, config)
                 final_feature_of_graph = feature_matrices_of_perts.mean(dim=0).clone()
 
             elif args.agg == "mean" and config.normalization == "After":
@@ -262,14 +266,14 @@ class EnrichedGraphDataset(Dataset):
                 normalized_adj = compute_symmetric_normalized_perturbed_adj(perturbed_adj)
                 if torch.isnan(normalized_adj).any():
                     raise ValueError("NaN values encountered in normalized adjacency matrices.")
-                feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config.k)
+                feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config)
                 final_feature_of_graph = feature_matrices_of_perts.mean(dim=0).clone()
 
             elif args.agg == "concat" and config.normalization == "Before":
                 normalized_adj = compute_symmetric_normalized_adj(edge_index)
                 normalized_adj_1 = normalized_adj.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
                 perturbed_adj = generate_perturbation(normalized_adj_1, self.p)
-                feature_matrices_of_perts = diffusion(perturbed_adj, feature_matrix, config.k)
+                feature_matrices_of_perts = diffusion(perturbed_adj, feature_matrix, config)
                 final_feature_of_graph = feature_matrices_of_perts.view(-1, feature_matrices_of_perts.size(-1)).clone()
 
             elif args.agg == "concat" and config.normalization == "After":
@@ -279,7 +283,7 @@ class EnrichedGraphDataset(Dataset):
                 normalized_adj = compute_symmetric_normalized_perturbed_adj(perturbed_adj)
                 if torch.isnan(normalized_adj).any():
                     raise ValueError("NaN values encountered in normalized adjacency matrices.")
-                feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config.k)
+                feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config)
                 final_feature_of_graph = feature_matrices_of_perts.view(-1, feature_matrices_of_perts.size(-1)).clone()
 
             enriched_data = Data(x=final_feature_of_graph, edge_index=edge_index, y=data.y)
