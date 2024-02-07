@@ -12,6 +12,7 @@ from torch_geometric.nn import global_add_pool
 from torch_geometric.utils import to_dense_adj
 from torch_scatter import scatter
 from torch_geometric.utils import degree
+from torch_geometric.transforms import BaseTransform
 from sklearn.model_selection import StratifiedKFold, KFold
 from torch_geometric.loader.dataloader import Collater
 import time
@@ -25,16 +26,51 @@ sweep_config = {
     "method": "bayes",
     "metric": {"name": "final_accuracy", "goal": "maximize"},
     "parameters": {
-        "lr": {"values": [0.01]},
-        "batch_size": {"values": [32]},
-        "dropout": {"values": [0.2]},
-        "normalization": {"values": ["Before"]},
-        "k": {"values": [3]},
-        "sum_or_cat": {"values": ["sum"]},
-        "hidden_dim": {"values": [16]}
+        "lr": {"values": [0.01, 0.001]},
+        "batch_size": {"values": [32, 64]},
+        "dropout": {"values": [0.2, 0.5]},
+        "normalization": {"values": ["Before", "After"]},
+        "k": {"values": [2, 3, 4]},
+        "sum_or_cat": {"values": ["cat", "sum"]},
+        "hidden_dim": {"values": [16, 32]}
     }
 }
-sweep_id = wandb.sweep(sweep_config, project="SDGNN")
+sweep_id = wandb.sweep(sweep_config, project="SDGNN_MUTAG")
+
+
+class FeatureDegree(BaseTransform):
+    r"""Adds the node degree as one hot encodings to the node features.
+
+    Args:
+        max_degree (int): Maximum degree.
+        in_degree (bool, optional): If set to :obj:`True`, will compute the
+            in-degree of nodes instead of the out-degree.
+            (default: :obj:`False`)
+        cat (bool, optional): Concat node degrees to node features instead
+            of replacing them. (default: :obj:`True`)
+    """
+
+    def __init__(self, max_degree, in_degree=False, cat=True):
+        self.in_degree = in_degree
+        self.cat = cat
+        self.max_degree = max_degree
+
+    def __call__(self, data):
+        idx, x = data.edge_index[1 if self.in_degree else 0], data.x
+        deg = degree(idx, data.num_nodes, dtype=torch.long)
+        deg = F.one_hot(deg, num_classes=self.max_degree + 1).to(torch.float)
+
+        if x is not None and self.cat:
+            x = x.view(-1, 1) if x.dim() == 1 else x
+            deg = degree(data.edge_index[0], data.num_nodes, dtype=torch.long).unsqueeze(-1)
+            data.x = torch.cat([x, deg.to(x.dtype)], dim=-1)
+        else:
+            data.x = deg
+
+        return data
+
+    def __repr__(self) -> str:
+        return f'{self.__class__.__name__}({self.in_degree})'
 
 
 def get_dataset(args):
@@ -209,11 +245,6 @@ class EnrichedGraphDataset(Dataset):
         if num_nodes < self.max_nodes:
             pad_size = self.max_nodes - num_nodes
             feature_matrix = torch.cat([feature_matrix, torch.zeros(pad_size, feature_matrix.size(1))], dim=0)
-
-        # if config.normalization == "Before":
-        #     adj = compute_symmetric_normalized_adj(edge_index)
-        # elif config.normalization == "After":
-        #     adj = get_adj(edge_index)
 
         # Pad adjacency if necessary
         if adj.size(0) < self.max_nodes:
@@ -471,7 +502,7 @@ def main(config=None):
     parser.add_argument('--epochs', type=int, default=200, help='maximum number of epochs')
     # parser.add_argument('--min_delta', type=float, default=0.001, help='min_delta in early stopping')
     # parser.add_argument('--patience', type=int, default=100, help='patience in early stopping')
-    parser.add_argument('--agg', type=str, default="mean", choices=["mean", "concat", "deepset"],
+    parser.add_argument('--agg', type=str, default="deepset", choices=["mean", "concat", "deepset"],
                         help='Method for aggregating the perturbation')
     # parser.add_argument('--normalization', type=str, default='After', choices=['After', 'Before'],
     #                    help='Doing normalization before generation of perturbations or after')
@@ -606,4 +637,4 @@ def main(config=None):
 
 
 if __name__ == "__main__":
-    wandb.agent(sweep_id, main, count=1)
+    wandb.agent(sweep_id, main, count=10)
