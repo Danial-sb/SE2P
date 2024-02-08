@@ -32,10 +32,10 @@ sweep_config = {
         "normalization": {"values": ["Before", "After"]},
         "k": {"values": [2, 3, 4]},
         "sum_or_cat": {"values": ["cat", "sum"]},
-        "hidden_dim": {"values": [16, 32]}
+        "hidden_dim": {"values": [16, 32, 64]}
     }
 }
-sweep_id = wandb.sweep(sweep_config, project="SDGNN_MUTAG")
+sweep_id = wandb.sweep(sweep_config, project="SDGNN_IMDB-BINARY")
 
 
 class FeatureDegree(BaseTransform):
@@ -493,7 +493,7 @@ def count_parameters(model):
 def main(config=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, choices=['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES',
-                                                        'PTC_GIN'], default='MUTAG',
+                                                        'PTC_GIN'], default='IMDB-BINARY',
                         help="Options are ['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES', 'PTC_GIN']")
     # parser.add_argument('--batch_size', type=int, default=32, help='batch size')
     # parser.add_argument('--seed', type=int, default=1234, help='seed for reproducibility')
@@ -502,7 +502,7 @@ def main(config=None):
     parser.add_argument('--epochs', type=int, default=200, help='maximum number of epochs')
     # parser.add_argument('--min_delta', type=float, default=0.001, help='min_delta in early stopping')
     # parser.add_argument('--patience', type=int, default=100, help='patience in early stopping')
-    parser.add_argument('--agg', type=str, default="deepset", choices=["mean", "concat", "deepset"],
+    parser.add_argument('--agg', type=str, default="mean", choices=["mean", "concat", "deepset"],
                         help='Method for aggregating the perturbation')
     # parser.add_argument('--normalization', type=str, default='After', choices=['After', 'Before'],
     #                    help='Doing normalization before generation of perturbations or after')
@@ -637,4 +637,4 @@ def main(config=None):
 
 
 if __name__ == "__main__":
-    wandb.agent(sweep_id, main, count=10)
+    wandb.agent(sweep_id, main, count=20)
