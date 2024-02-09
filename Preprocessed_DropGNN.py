@@ -32,10 +32,10 @@ sweep_config = {
         "normalization": {"values": ["Before", "After"]},
         "k": {"values": [2, 3, 4]},
         "sum_or_cat": {"values": ["cat", "sum"]},
-        "hidden_dim": {"values": [16, 32, 64]}
+        "hidden_dim": {"values": [32, 64]}
     }
 }
-sweep_id = wandb.sweep(sweep_config, project="SDGNN_IMDB-BINARY")
+sweep_id = wandb.sweep(sweep_config, project="SDGNN_IMDB-MULTI")
 
 
 class FeatureDegree(BaseTransform):
@@ -493,7 +493,7 @@ def count_parameters(model):
 def main(config=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, choices=['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES',
-                                                        'PTC_GIN'], default='IMDB-BINARY',
+                                                        'PTC_GIN'], default='IMDB-MULTI',
                         help="Options are ['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES', 'PTC_GIN']")
     # parser.add_argument('--batch_size', type=int, default=32, help='batch size')
     # parser.add_argument('--seed', type=int, default=1234, help='seed for reproducibility')
@@ -531,7 +531,8 @@ def main(config=None):
     print(f'Number of graphs: {len(dataset)}')
     gamma = mean_n
     p = 2 * 1 / (1 + gamma)
-    num_perturbations = round(gamma * np.log10(gamma))
+    # num_perturbations = round(gamma * np.log10(gamma))
+    num_perturbations = gamma
     print(f'Number of perturbations: {num_perturbations}')
     print(f'Sampling probability: {p}')
     current_path = os.getcwd()
@@ -637,4 +638,4 @@ def main(config=None):
 
 
 if __name__ == "__main__":
-    wandb.agent(sweep_id, main, count=20)
+    wandb.agent(sweep_id, main, count=25)
