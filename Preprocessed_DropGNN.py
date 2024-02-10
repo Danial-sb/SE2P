@@ -31,11 +31,11 @@ sweep_config = {
         "dropout": {"values": [0.2, 0.5]},
         "normalization": {"values": ["Before", "After"]},
         "k": {"values": [2, 3, 4]},
-        "sum_or_cat": {"values": ["cat", "sum"]},
-        "hidden_dim": {"values": [32, 64]}
+        "sum_or_cat": {"values": ["sum"]},
+        "hidden_dim": {"values": [16, 32, 64]}
     }
 }
-sweep_id = wandb.sweep(sweep_config, project="SDGNN_IMDB-MULTI")
+sweep_id = wandb.sweep(sweep_config, project="SDGNN_ENZYMES")
 
 
 class FeatureDegree(BaseTransform):
@@ -219,8 +219,10 @@ def diffusion(adj_perturbed, feature_matrix, config):
         if config.sum_or_cat == "sum":
             internal_diffusion = torch.stack(internal_diffusion, dim=0)
             internal_diffusion = torch.sum(internal_diffusion, dim=0)
-        else:
+        elif config.sum_or_cat == "cat":
             internal_diffusion = torch.cat(internal_diffusion, dim=0)
+        else:
+            raise ValueError("AGG in EQ1 should be either cat or sum")
 
         enriched_feature_matrices.append(internal_diffusion)
 
@@ -263,6 +265,12 @@ class EnrichedGraphDataset(Dataset):
         for data in dataset:
             edge_index = data.edge_index
             feature_matrix = data.x.clone()
+
+            if args.agg not in ["deepset", "mean", "concat"]:
+                raise ValueError("Invalid aggregation method specified")
+
+            if config.normalization not in ["Before", "After"]:
+                raise ValueError("Invalid normalization configuration")
 
             if args.agg == "deepset" and config.normalization == "Before":
                 adj = compute_symmetric_normalized_adj(edge_index)
@@ -316,6 +324,8 @@ class EnrichedGraphDataset(Dataset):
                     raise ValueError("NaN values encountered in normalized adjacency matrices.")
                 feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config)
                 final_feature_of_graph = feature_matrices_of_perts.view(-1, feature_matrices_of_perts.size(-1)).clone()
+            else:
+                raise ValueError("Error in choosing hyper parameters")
 
             enriched_data = Data(x=final_feature_of_graph, edge_index=edge_index, y=data.y)
             enriched_dataset.append(enriched_data)
@@ -493,7 +503,7 @@ def count_parameters(model):
 def main(config=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, choices=['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES',
-                                                        'PTC_GIN'], default='IMDB-MULTI',
+                                                        'PTC_GIN'], default='ENZYMES',
                         help="Options are ['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES', 'PTC_GIN']")
     # parser.add_argument('--batch_size', type=int, default=32, help='batch size')
     # parser.add_argument('--seed', type=int, default=1234, help='seed for reproducibility')
@@ -507,7 +517,6 @@ def main(config=None):
     # parser.add_argument('--normalization', type=str, default='After', choices=['After', 'Before'],
     #                    help='Doing normalization before generation of perturbations or after')
     args = parser.parse_args()
-    print(args)
     wandb.login()
     dataset = get_dataset(args)
     print(dataset)
@@ -539,6 +548,7 @@ def main(config=None):
 
     with wandb.init(config=config):
         config = wandb.config
+        print(args)
         start_time = time.time()
         enriched_dataset = EnrichedGraphDataset(os.path.join(current_path, 'enriched_dataset'), dataset, p=p,
                                                 num_perturbations=num_perturbations, max_nodes=max_nodes, config=config,
