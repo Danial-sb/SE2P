@@ -35,7 +35,7 @@ sweep_config = {
         "hidden_dim": {"values": [16, 32, 64]}
     }
 }
-sweep_id = wandb.sweep(sweep_config, project="SDGNN_ENZYMES")
+sweep_id = wandb.sweep(sweep_config, project="SDGNN_PTC")
 
 
 class FeatureDegree(BaseTransform):
@@ -368,7 +368,7 @@ class DeepSet(nn.Module):
         # Apply MLP to each perturbation
         # print(input_data.shape)
         perturbation_outputs = torch.stack(
-            [self.mlp_perturbation(input_data[:, i, :]) for i in range(self.num_perturbations)])
+            [self.mlp_perturbation(input_data[:, i, :]) for i in range(len(input_data[1]))])
         # print(perturbation_outputs.shape)
         # Sum over perturbations
         aggregated_output = torch.sum(perturbation_outputs, dim=0)
@@ -400,7 +400,7 @@ class SDGNN_DeepSet(nn.Module):
         self.linear3.reset_parameters()
 
     def forward(self, data):
-        x = data.x
+        x = data.x  # [num_perturbation, num_nodes, num_features]
         batch = data.batch
         # print(f'input: {x.shape}')
         aggregated_features = self.deepset_aggregator(x)
@@ -503,7 +503,7 @@ def count_parameters(model):
 def main(config=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, choices=['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES',
-                                                        'PTC_GIN'], default='ENZYMES',
+                                                        'PTC_GIN'], default='PTC_GIN',
                         help="Options are ['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES', 'PTC_GIN']")
     # parser.add_argument('--batch_size', type=int, default=32, help='batch size')
     # parser.add_argument('--seed', type=int, default=1234, help='seed for reproducibility')
