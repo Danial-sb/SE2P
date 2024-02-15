@@ -13,8 +13,9 @@ from torch_geometric.utils import degree
 from torch_geometric.nn import GCNConv, global_add_pool, GINConv
 from sklearn.model_selection import StratifiedKFold, KFold
 import logging
+from ptc_dataset import PTCDataset
 
-logging.basicConfig(filename='log/imdbb.log', level=logging.INFO, format='%(asctime)s - %(message)s')
+logging.basicConfig(filename='log/ptc.log', level=logging.INFO, format='%(asctime)s - %(message)s')
 
 
 def main(args, cluster=None):
@@ -63,8 +64,16 @@ def main(args, cluster=None):
         path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', 'ENZYMES')
         dataset = TUDataset(path, name='ENZYMES', pre_filter=MyFilter())
 
+    elif 'PTC_GIN' in args.dataset:
+        class MyFilter(object):
+            def __call__(self, data):
+                return True
+
+        path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', 'PTC_GIN')
+        dataset = PTCDataset(path, name='PTC')
+
     else:
-        raise ValueError
+        raise ValueError("Invalid dataset name")
 
     print(dataset)
 
@@ -492,13 +501,14 @@ def main(args, cluster=None):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', type=str, choices=['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES'],
-                        default='IMDB-BINARY', help="Options are ['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS']")
+    parser.add_argument('--dataset', type=str, choices=['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES',
+                                                        'PTC_GIN'], default='PTC_GIN',
+                        help="Options are ['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES', 'PTC_GIN']")
     parser.add_argument('--batch_size', type=int, default=32, help='batch size')
     parser.add_argument('--seed', type=int, default=1234, help='seed for reproducibility')
     parser.add_argument('--lr', type=float, default=0.01, help='learning rate')
-    parser.add_argument('--model', type=str, choices=['GIN', 'DropGIN', 'GCN', 'DropGCN'], default="DropGCN")
-    parser.add_argument('--hidden_units', type=int, default=32, choices=[64, 32])
+    parser.add_argument('--model', type=str, choices=['GIN', 'DropGIN', 'GCN', 'DropGCN'], default="DropGIN")
+    parser.add_argument('--hidden_units', type=int, default=16, choices=[64, 32])
     parser.add_argument('--dropout', type=float, choices=[0.5, 0.2], default=0.2, help='dropout probability')
     parser.add_argument('--epochs', type=int, default=200, help='maximum number of epochs')
     parser.add_argument('--min_delta', type=float, default=0.001, help='min_delta in early stopping')
@@ -508,6 +518,7 @@ if __name__ == '__main__':
     print(args)
     logging.info(args)
     print(f"model:{args.model}")
+    logging.info(f"model:{args.model}")
     main(args)
 
     print('Finished', flush=True)

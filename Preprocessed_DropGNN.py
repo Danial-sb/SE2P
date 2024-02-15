@@ -29,13 +29,13 @@ sweep_config = {
         "lr": {"values": [0.01, 0.001]},
         "batch_size": {"values": [32, 64]},
         "dropout": {"values": [0.2, 0.5]},
-        "normalization": {"values": ["Before", "After"]},
+        "normalization": {"values": ["Before"]},
         "k": {"values": [2, 3, 4]},
         "sum_or_cat": {"values": ["sum"]},
         "hidden_dim": {"values": [16, 32, 64]}
     }
 }
-sweep_id = wandb.sweep(sweep_config, project="SDGNN_PTC")
+sweep_id = wandb.sweep(sweep_config, project="SDGNN_NCI1")
 
 
 class FeatureDegree(BaseTransform):
@@ -123,6 +123,22 @@ def get_dataset(args):
 
         path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', 'PTC_GIN')
         dataset = PTCDataset(path, name='PTC')
+
+    elif 'NCI1' in args.dataset:
+        class MyFilter(object):
+            def __call__(self, data):
+                return True
+
+        path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', 'NCI1')
+        dataset = TUDataset(path, name='NCI1', pre_filter=MyFilter())
+
+    elif 'NCI109' in args.dataset:
+        class MyFilter(object):
+            def __call__(self, data):
+                return True
+
+        path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', 'NCI109')
+        dataset = TUDataset(path, name='NCI109', pre_filter=MyFilter())
     else:
         raise ValueError("Invalid dataset name")
 
@@ -503,8 +519,9 @@ def count_parameters(model):
 def main(config=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, choices=['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES',
-                                                        'PTC_GIN'], default='PTC_GIN',
-                        help="Options are ['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES', 'PTC_GIN']")
+                                                        'PTC_GIN', 'NCI1', 'NCI109'], default='NCI1',
+                        help="Options are ['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES', 'PTC_GIN', "
+                             "'NCI1', 'NCI109']")
     # parser.add_argument('--batch_size', type=int, default=32, help='batch size')
     # parser.add_argument('--seed', type=int, default=1234, help='seed for reproducibility')
     # parser.add_argument('--lr', type=float, default=0.01, help='learning rate')
@@ -648,4 +665,4 @@ def main(config=None):
 
 
 if __name__ == "__main__":
-    wandb.agent(sweep_id, main, count=25)
+    wandb.agent(sweep_id, main, count=30)
