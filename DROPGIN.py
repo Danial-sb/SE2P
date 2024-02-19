@@ -14,8 +14,9 @@ from torch_geometric.nn import GCNConv, global_add_pool, GINConv
 from sklearn.model_selection import StratifiedKFold, KFold
 import logging
 from ptc_dataset import PTCDataset
+from Preprocessed_DropGNN import FeatureDegree
 
-logging.basicConfig(filename='log/ptc.log', level=logging.INFO, format='%(asctime)s - %(message)s')
+logging.basicConfig(filename='log/collab.log', level=logging.INFO, format='%(asctime)s - %(message)s')
 
 
 def main(args, cluster=None):
@@ -71,6 +72,27 @@ def main(args, cluster=None):
 
         path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', 'PTC_GIN')
         dataset = PTCDataset(path, name='PTC')
+
+    # elif 'NCI1' in args.dataset:
+    #     class MyFilter(object):
+    #         def __call__(self, data):
+    #             return True
+    #
+    #     path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', 'NCI1')
+    #     dataset = TUDataset(path, name='NCI1', pre_filter=MyFilter())
+
+    elif 'NCI109' in args.dataset:
+        class MyFilter(object):
+            def __call__(self, data):
+                return True
+
+        path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', 'NCI109')
+        dataset = TUDataset(path, name='NCI109', pre_filter=MyFilter())
+
+    elif 'COLLAB' in args.dataset:
+
+        path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', 'COLLAB')
+        dataset = TUDataset(path, name='COLLAB', transform=FeatureDegree(max_degree=491, cat=False))
 
     else:
         raise ValueError("Invalid dataset name")
@@ -502,13 +524,13 @@ def main(args, cluster=None):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, choices=['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES',
-                                                        'PTC_GIN'], default='PTC_GIN',
+                                                        'PTC_GIN', 'NCI109', 'COLLAB'], default='COLLAB',
                         help="Options are ['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES', 'PTC_GIN']")
-    parser.add_argument('--batch_size', type=int, default=32, help='batch size')
+    parser.add_argument('--batch_size', type=int, default=64, help='batch size')
     parser.add_argument('--seed', type=int, default=1234, help='seed for reproducibility')
     parser.add_argument('--lr', type=float, default=0.01, help='learning rate')
-    parser.add_argument('--model', type=str, choices=['GIN', 'DropGIN', 'GCN', 'DropGCN'], default="DropGIN")
-    parser.add_argument('--hidden_units', type=int, default=16, choices=[64, 32])
+    parser.add_argument('--model', type=str, choices=['GIN', 'DropGIN', 'GCN', 'DropGCN'], default="DropGCN")
+    parser.add_argument('--hidden_units', type=int, default=64, choices=[64, 32])
     parser.add_argument('--dropout', type=float, choices=[0.5, 0.2], default=0.2, help='dropout probability')
     parser.add_argument('--epochs', type=int, default=200, help='maximum number of epochs')
     parser.add_argument('--min_delta', type=float, default=0.001, help='min_delta in early stopping')

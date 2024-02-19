@@ -35,7 +35,7 @@ sweep_config = {
         "hidden_dim": {"values": [16, 32, 64]}
     }
 }
-sweep_id = wandb.sweep(sweep_config, project="SDGNN_NCI1")
+sweep_id = wandb.sweep(sweep_config, project="SDGNN-COLLAB")
 
 
 class FeatureDegree(BaseTransform):
@@ -123,6 +123,11 @@ def get_dataset(args):
 
         path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', 'PTC_GIN')
         dataset = PTCDataset(path, name='PTC')
+
+    elif 'COLLAB' in args.dataset:
+
+        path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', 'COLLAB')
+        dataset = TUDataset(path, name='COLLAB', transform=FeatureDegree(max_degree=491, cat=False))
 
     elif 'NCI1' in args.dataset:
         class MyFilter(object):
@@ -384,7 +389,7 @@ class DeepSet(nn.Module):
         # Apply MLP to each perturbation
         # print(input_data.shape)
         perturbation_outputs = torch.stack(
-            [self.mlp_perturbation(input_data[:, i, :]) for i in range(len(input_data[1]))])
+            [self.mlp_perturbation(input_data[:, i, :]) for i in range(self.num_perturbations)])
         # print(perturbation_outputs.shape)
         # Sum over perturbations
         aggregated_output = torch.sum(perturbation_outputs, dim=0)
@@ -519,7 +524,7 @@ def count_parameters(model):
 def main(config=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, choices=['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES',
-                                                        'PTC_GIN', 'NCI1', 'NCI109'], default='NCI1',
+                                                        'PTC_GIN', 'NCI1', 'NCI109', 'COLLAB'], default='COLLAB',
                         help="Options are ['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES', 'PTC_GIN', "
                              "'NCI1', 'NCI109']")
     # parser.add_argument('--batch_size', type=int, default=32, help='batch size')
@@ -665,4 +670,4 @@ def main(config=None):
 
 
 if __name__ == "__main__":
-    wandb.agent(sweep_id, main, count=30)
+    wandb.agent(sweep_id, main, count=1)
