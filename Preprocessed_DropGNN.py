@@ -27,15 +27,17 @@ sweep_config = {
     "metric": {"name": "final_accuracy", "goal": "maximize"},
     "parameters": {
         "lr": {"values": [0.01, 0.001]},
+        "num_layers": {"values": [2, 3, 4]},
+        "batch_norm": {"values": [True, False]},
         "batch_size": {"values": [32, 64]},
         "dropout": {"values": [0.2, 0.5]},
         "normalization": {"values": ["Before"]},
-        "k": {"values": [2, 3, 4]},
-        "sum_or_cat": {"values": ["sum"]},
-        "hidden_dim": {"values": [16, 32, 64]}
+        "k": {"values": [2, 3, 3]},
+        "sum_or_cat": {"values": ["cat"]},
+        "hidden_dim": {"values": [32, 64]}
     }
 }
-sweep_id = wandb.sweep(sweep_config, project="SDGNN-COLLAB")
+sweep_id = wandb.sweep(sweep_config, project="SDGNN-IMDBB_Cat")
 
 
 class FeatureDegree(BaseTransform):
@@ -241,7 +243,7 @@ def diffusion(adj_perturbed, feature_matrix, config):
             internal_diffusion = torch.stack(internal_diffusion, dim=0)
             internal_diffusion = torch.sum(internal_diffusion, dim=0)
         elif config.sum_or_cat == "cat":
-            internal_diffusion = torch.cat(internal_diffusion, dim=0)
+            internal_diffusion = torch.cat(internal_diffusion, dim=1)
         else:
             raise ValueError("AGG in EQ1 should be either cat or sum")
 
@@ -441,14 +443,24 @@ class SDGNN_DeepSet(nn.Module):
 
 
 class SDGNN(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim, dropout):
+    def __init__(self, input_dim, hidden_dim, output_dim, dropout, num_layers, batch_norm=True):
         super(SDGNN, self).__init__()
 
-        self.linear1 = nn.Linear(input_dim, hidden_dim)
-        self.bn1 = nn.BatchNorm1d(hidden_dim)
+        self.num_layers = num_layers
+        self.batch_norm = batch_norm
+
+        self.linears = nn.ModuleList([
+            nn.Linear(input_dim if i == 0 else hidden_dim, hidden_dim)
+            for i in range(num_layers)
+        ])
+
+        if self.batch_norm:
+            self.bns = nn.ModuleList([
+                nn.BatchNorm1d(hidden_dim)
+                for _ in range(num_layers)
+            ])
+
         self.activation = nn.ELU()
-        self.linear2 = nn.Linear(hidden_dim, hidden_dim)
-        self.bn2 = nn.BatchNorm1d(hidden_dim)
         self.linear3 = nn.Linear(hidden_dim, hidden_dim // 2)
         self.linear4 = nn.Linear(hidden_dim // 2, output_dim)
         self.dropout = dropout
@@ -456,36 +468,31 @@ class SDGNN(nn.Module):
         self.reset_parameters()
 
     def reset_parameters(self):
-        self.linear1.reset_parameters()
-        self.linear2.reset_parameters()
+        for linear in self.linears:
+            linear.reset_parameters()
         self.linear3.reset_parameters()
         self.linear4.reset_parameters()
-        self.bn1.reset_parameters()
-        self.bn2.reset_parameters()
+        if self.batch_norm:
+            for bn in self.bns:
+                bn.reset_parameters()
 
     def forward(self, data):
         x = data.x
         batch = data.batch
-        # print(f'x before view: {x.shape}')
-        # print(f'x after view: {x.shape}')
-        x = self.bn1(self.linear1(x))
-        x = self.activation(x)
-        x = F.dropout(x, p=self.dropout, training=self.training)
-        # print(f'x after linear 1: {x.shape}')
-        # x = F.dropout(x, p=self.dropout, training=self.training)
-        x = self.bn2(self.linear2(x))
-        x = self.activation(x)
-        x = F.dropout(x, p=self.dropout, training=self.training)
-        # print(f'x after linear 2: {x.shape}')
+
+        for i in range(self.num_layers):
+            x = self.linears[i](x)
+            if self.batch_norm:
+                x = self.bns[i](x)
+            x = self.activation(x)
+            x = F.dropout(x, p=self.dropout, training=self.training)
 
         x = global_add_pool(x, batch)
-        # print(f'x after sum pooling: {x.shape}')
-        # x = F.dropout(x, p=self.dropout, training=self.training)
+
         x = self.linear3(x)
         x = self.activation(x)
 
         x = self.linear4(x)
-        # print(f'x after linear 3: {x.shape}')
         return F.log_softmax(x, dim=-1)
 
 
@@ -524,7 +531,7 @@ def count_parameters(model):
 def main(config=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, choices=['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES',
-                                                        'PTC_GIN', 'NCI1', 'NCI109', 'COLLAB'], default='COLLAB',
+                                                        'PTC_GIN', 'NCI1', 'NCI109', 'COLLAB'], default='IMDB-BINARY',
                         help="Options are ['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES', 'PTC_GIN', "
                              "'NCI1', 'NCI109']")
     # parser.add_argument('--batch_size', type=int, default=32, help='batch size')
@@ -617,29 +624,40 @@ def main(config=None):
                                           enriched_dataset.num_classes, config.dropout, num_perturbations).to(device)
                 else:
                     model = SDGNN(enriched_dataset.num_features, config.hidden_dim, enriched_dataset.num_classes,
-                                  config.dropout).to(device)
+                                  config.dropout, config.num_layers, config.batch_norm).to(device)
 
                 if fold == 0:
                     print(f'Model learnable parameters: {count_parameters(model)}')
                 optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
                 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.5)
 
+                time_per_epoch = []
                 validation_accuracies = []
                 # Training loop for the current fold
                 for epoch in range(1, args.epochs + 1):
+                    start_time_epoch = time.time()
                     lr = scheduler.optimizer.param_groups[0]['lr']
                     train_loss = train(model, train_loader, optimizer, device)
                     scheduler.step()
+                    memory_allocated = torch.cuda.max_memory_allocated(device) // (1024 ** 2)
+                    memory_reserved = torch.cuda.max_memory_reserved(device) // (1024 ** 2)
                     test_acc = test(model, test_loader, device)
+                    end_time_epoch = time.time()
+                    elapsed_time_epoch = end_time_epoch - start_time_epoch
+                    time_per_epoch.append(elapsed_time_epoch)
                     if epoch % 20 == 0:
-                        print(f'Epoch: {epoch:02d} | TrainLoss: {train_loss:.3f} | Test_acc: {test_acc:.3f}')
+                        print(f'Epoch: {epoch:02d} | TrainLoss: {train_loss:.3f} | Test_acc: {test_acc:.3f} | Time'
+                              f'/epoch: {elapsed_time_epoch:.2f}')
                     validation_accuracies.append(test_acc)
 
+                print(f'Average time per epoch in fold {fold} and seed {seed}: {np.mean(time_per_epoch)}')
+                print(f'Std time per epoch in fold {fold} and seed {seed}: {np.std(time_per_epoch)}')
                 all_validation_accuracies.append(validation_accuracies)
                 # Print fold training time
                 end_time_fold = time.time()
                 elapsed_time_fold = end_time_fold - start_time_fold
-                print(f'Time taken for training in seed {seed}, fold {fold + 1}: {elapsed_time_fold:.2f} seconds')
+                print(f'Time taken for training in seed {seed}, fold {fold + 1}: {elapsed_time_fold:.2f} seconds, '
+                      f'Memory Allocated: {memory_allocated} MB | Memory Reserved: {memory_reserved} MB')
                 time_seed.append(elapsed_time_fold)
             print("=" * 30)
             average_validation_curve = np.mean(all_validation_accuracies, axis=0)
@@ -670,4 +688,4 @@ def main(config=None):
 
 
 if __name__ == "__main__":
-    wandb.agent(sweep_id, main, count=1)
+    wandb.agent(sweep_id, main, count=30)
