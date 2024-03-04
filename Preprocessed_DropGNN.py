@@ -7,12 +7,14 @@ from torch.utils.data import RandomSampler
 import torch.nn as nn
 import torch.nn.functional as F
 import copy
+import random
 import numpy as np
 from torch_geometric.nn import global_add_pool
 from torch_geometric.utils import to_dense_adj
 from torch_scatter import scatter
 from torch_geometric.utils import degree
 from torch_geometric.transforms import BaseTransform
+from torch.nn.functional import pad
 from sklearn.model_selection import StratifiedKFold, KFold
 from torch_geometric.loader.dataloader import Collater
 import time
@@ -24,20 +26,20 @@ from ptc_dataset import PTCDataset
 
 sweep_config = {
     "method": "bayes",
-    "metric": {"name": "final_accuracy", "goal": "maximize"},
+    "metric": {"name": "test_acc", "goal": "maximize"},
     "parameters": {
-        "lr": {"values": [0.01, 0.001]},
-        "num_layers": {"values": [2, 3, 4]},
-        "batch_norm": {"values": [True, False]},
-        "batch_size": {"values": [32, 64]},
-        "dropout": {"values": [0.2, 0.5]},
-        "normalization": {"values": ["Before"]},
-        "k": {"values": [2, 3, 3]},
+        "lr": {"values": [0.01]},
+        "num_layers": {"values": [4]},
+        "batch_norm": {"values": [True]},
+        "batch_size": {"values": [32]},
+        "dropout": {"values": [0.5]},
+        "normalization": {"values": ["After"]},
+        "k": {"values": [2]},
         "sum_or_cat": {"values": ["cat"]},
-        "hidden_dim": {"values": [32, 64]}
+        "hidden_dim": {"values": [32]}
     }
 }
-sweep_id = wandb.sweep(sweep_config, project="SDGNN-IMDBB_Cat")
+sweep_id = wandb.sweep(sweep_config, project="OGB_molhiv")
 
 
 class FeatureDegree(BaseTransform):
@@ -152,40 +154,34 @@ def get_dataset(args):
     return dataset
 
 
-def separate_data(dataset_len, seed):
+def separate_data(dataset_len, n_splits, seed):
     # Use same splitting/10-fold as GIN paper
-    skf = StratifiedKFold(n_splits=10, shuffle=True, random_state=seed)
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
     idx_list = []
     for idx in skf.split(np.zeros(dataset_len), np.zeros(dataset_len)):
         idx_list.append(idx)
     return idx_list
 
 
-def get_adj(edge_index):
+def get_adj(edge_index, set_diag=True, symmetric_normalize=True):
+    # Convert to dense adjacency matrix
     adj = to_dense_adj(edge_index).squeeze()
-    identity_matrix = torch.eye(adj.shape[0])
-    adj_with_self_loops = adj + identity_matrix
-    return adj_with_self_loops
+
+    if set_diag:
+        identity_matrix = torch.eye(adj.shape[0])
+        adj = adj + identity_matrix
+    if symmetric_normalize:
+        D = torch.diag(adj.sum(dim=1))
+        D_inv_sqrt = torch.diag(1.0 / torch.sqrt(D.diagonal()))
+        adj = torch.mm(torch.mm(D_inv_sqrt, adj), D_inv_sqrt)
+        adj[torch.isnan(adj)] = 0.0
+
+    return adj
 
 
-def compute_symmetric_normalized_adj(edge_index):
-    #  Convert to dense adjacency matrix
-    adj = to_dense_adj(edge_index).squeeze()
-    identity_matrix = torch.eye(adj.shape[0])
-    adj_with_self_loops = adj + identity_matrix
-    # Compute the degree matrix (D) by summing over rows
-    D = torch.diag(adj_with_self_loops.sum(dim=1))
+def generate_perturbation(adj, p, seed):
+    torch.manual_seed(seed)
 
-    # Compute the inverse square root of the degree matrix (D_inv_sqrt)
-    D_inv_sqrt = torch.diag(1.0 / torch.sqrt(D.diagonal()))
-
-    # Apply symmetric normalization to the adjacency matrix
-    adj_normalized = torch.mm(torch.mm(D_inv_sqrt, adj_with_self_loops), D_inv_sqrt)
-
-    return adj_normalized
-
-
-def generate_perturbation(adj, p):
     all_adj = [adj[0].clone()]
     adj_perturbation = adj.clone()  # Make a copy of the original adjacency matrix for this perturbation
 
@@ -205,8 +201,6 @@ def generate_perturbation(adj, p):
 
 
 def compute_symmetric_normalized_perturbed_adj(adj_perturbed):  # This is for doing normalization after perturbation
-    # Convert to dense adjacency matrix
-    # adj = to_dense_adj(edge_index).squeeze()
     normalized_adj = []
     for perturbation in range(adj_perturbed.shape[0]):
         # Compute the degree matrix (D) by summing over rows
@@ -225,7 +219,8 @@ def compute_symmetric_normalized_perturbed_adj(adj_perturbed):  # This is for do
     return all_normalized_adj
 
 
-def diffusion(adj_perturbed, feature_matrix, config):
+def diffusion(adj_perturbed, feature_matrix, config, seed):
+    torch.manual_seed(seed)
     enriched_feature_matrices = []
     for perturbation in range(adj_perturbed.size(0)):
         # Get the adjacency matrix for this perturbation
@@ -255,12 +250,12 @@ def diffusion(adj_perturbed, feature_matrix, config):
 
 
 class EnrichedGraphDataset(Dataset):
-    def __init__(self, root, dataset, p, num_perturbations, max_nodes, config, args):
+    def __init__(self, root, dataset, p, num_perturbations, config, args):
         super(EnrichedGraphDataset, self).__init__(root, transform=None, pre_transform=None)
         # self.k = k
         self.p = p
         self.num_perturbations = num_perturbations
-        self.max_nodes = max_nodes
+        # self.max_nodes = max_nodes
         self.data_list = self.process_dataset(dataset, config, args)
 
     def pad_data(self, feature_matrix, adj):
@@ -281,13 +276,15 @@ class EnrichedGraphDataset(Dataset):
         return feature_matrix, adj
 
     def process_dataset(self, dataset, config, args):
-        # dataset = TUDataset(self.root, name)
-        enriched_dataset = []
-        final_feature_of_graph = None
+        torch.manual_seed(args.seed)
+        np.random.seed(args.seed)
 
+        enriched_dataset = []
+        # final_feature_of_graph = None
+        counter = 0
         for data in dataset:
             edge_index = data.edge_index
-            feature_matrix = data.x.clone()
+            feature_matrix = data.x.clone().float()  # Converted to float for ogb
 
             if args.agg not in ["deepset", "mean", "concat"]:
                 raise ValueError("Invalid aggregation method specified")
@@ -296,56 +293,73 @@ class EnrichedGraphDataset(Dataset):
                 raise ValueError("Invalid normalization configuration")
 
             if args.agg == "deepset" and config.normalization == "Before":
-                adj = compute_symmetric_normalized_adj(edge_index)
-                feature_matrix, normalized_adj = self.pad_data(feature_matrix, adj)
-                normalized_adj_1 = normalized_adj.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
-                perturbed_adj = generate_perturbation(normalized_adj_1, self.p)
-                feature_matrices_of_perts = diffusion(perturbed_adj, feature_matrix, config)
-                final_feature_of_graph = feature_matrices_of_perts
+                adj = get_adj(edge_index, set_diag=False, symmetric_normalize=True)
+                feature_matrix, adj = self.pad_data(feature_matrix, adj)
+                # if adj.size(0) != feature_matrix.size(0): # for ogb
+                #     counter = counter + 1
+                #     max_size = max(adj.size(0), feature_matrix.size(0))
+                #     pad_amount = max_size - adj.size(0)
+                #     adj = pad(adj, (0, pad_amount, 0, pad_amount), mode='constant', value=0)
+                adj = adj.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
+                perturbed_adj = generate_perturbation(adj, self.p, args.seed)
+                feature_matrices_of_perts = diffusion(perturbed_adj, feature_matrix, config, args.seed)
+                final_feature_of_graph = feature_matrices_of_perts.view(-1, feature_matrices_of_perts.size(
+                    -1))  # remove view if wanted to use previous
 
             elif args.agg == "deepset" and config.normalization == "After":
-                adj = get_adj(edge_index)
-                feature_matrix, adjacency = self.pad_data(feature_matrix, adj)
-                adj = adjacency.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
-                perturbed_adj = generate_perturbation(adj, self.p)
+                adj = get_adj(edge_index, set_diag=False,
+                              symmetric_normalize=False)  # set diag here can be false or true
+                feature_matrix, adj = self.pad_data(feature_matrix, adj)
+                adj = adj.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
+                perturbed_adj = generate_perturbation(adj, self.p, args.seed)
                 normalized_adj = compute_symmetric_normalized_perturbed_adj(perturbed_adj)
                 if torch.isnan(normalized_adj).any():
                     raise ValueError("NaN values encountered in normalized adjacency matrices.")
-                feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config)
-                final_feature_of_graph = feature_matrices_of_perts
+                feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config, args.seed)
+                final_feature_of_graph = feature_matrices_of_perts.view(-1, feature_matrices_of_perts.size(-1))
 
             elif args.agg == "mean" and config.normalization == "Before":
-                normalized_adj = compute_symmetric_normalized_adj(edge_index)
-                normalized_adj_1 = normalized_adj.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
-                perturbed_adj = generate_perturbation(normalized_adj_1, self.p)
-                feature_matrices_of_perts = diffusion(perturbed_adj, feature_matrix, config)
+                adj = get_adj(edge_index, set_diag=False, symmetric_normalize=True)
+                if adj.size(0) != feature_matrix.size(0):
+                    counter = counter + 1
+                    max_size = max(adj.size(0), feature_matrix.size(0))
+                    pad_amount = max_size - adj.size(0)
+                    adj = pad(adj, (0, pad_amount, 0, pad_amount), mode='constant', value=0)
+                adj = adj.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
+                perturbed_adj = generate_perturbation(adj, self.p, args.seed)
+                feature_matrices_of_perts = diffusion(perturbed_adj, feature_matrix, config, args.seed)
                 final_feature_of_graph = feature_matrices_of_perts.mean(dim=0).clone()
 
             elif args.agg == "mean" and config.normalization == "After":
-                adjacency = get_adj(edge_index)
-                adj = adjacency.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
-                perturbed_adj = generate_perturbation(adj, self.p)
+                adj = get_adj(edge_index, set_diag=False, symmetric_normalize=False)
+                if adj.size(0) != feature_matrix.size(0):
+                    counter = counter + 1
+                    max_size = max(adj.size(0), feature_matrix.size(0))
+                    pad_amount = max_size - adj.size(0)
+                    adj = pad(adj, (0, pad_amount, 0, pad_amount), mode='constant', value=0)
+                adj = adj.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
+                perturbed_adj = generate_perturbation(adj, self.p, args.seed)
                 normalized_adj = compute_symmetric_normalized_perturbed_adj(perturbed_adj)
                 if torch.isnan(normalized_adj).any():
                     raise ValueError("NaN values encountered in normalized adjacency matrices.")
-                feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config)
+                feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config, args.seed)
                 final_feature_of_graph = feature_matrices_of_perts.mean(dim=0).clone()
 
             elif args.agg == "concat" and config.normalization == "Before":
-                normalized_adj = compute_symmetric_normalized_adj(edge_index)
-                normalized_adj_1 = normalized_adj.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
-                perturbed_adj = generate_perturbation(normalized_adj_1, self.p)
-                feature_matrices_of_perts = diffusion(perturbed_adj, feature_matrix, config)
+                adj = get_adj(edge_index, set_diag=True, symmetric_normalize=True)
+                adj = adj.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
+                perturbed_adj = generate_perturbation(adj, self.p, args.seed)
+                feature_matrices_of_perts = diffusion(perturbed_adj, feature_matrix, config, args.seed)
                 final_feature_of_graph = feature_matrices_of_perts.view(-1, feature_matrices_of_perts.size(-1)).clone()
 
             elif args.agg == "concat" and config.normalization == "After":
-                adjacency = get_adj(edge_index)
-                adj = adjacency.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
-                perturbed_adj = generate_perturbation(adj, self.p)
+                adj = get_adj(edge_index, set_diag=False, symmetric_normalize=False)
+                adj = adj.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
+                perturbed_adj = generate_perturbation(adj, self.p, args.seed)
                 normalized_adj = compute_symmetric_normalized_perturbed_adj(perturbed_adj)
                 if torch.isnan(normalized_adj).any():
                     raise ValueError("NaN values encountered in normalized adjacency matrices.")
-                feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config)
+                feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config, args.seed)
                 final_feature_of_graph = feature_matrices_of_perts.view(-1, feature_matrices_of_perts.size(-1)).clone()
             else:
                 raise ValueError("Error in choosing hyper parameters")
@@ -353,6 +367,7 @@ class EnrichedGraphDataset(Dataset):
             enriched_data = Data(x=final_feature_of_graph, edge_index=edge_index, y=data.y)
             enriched_dataset.append(enriched_data)
 
+        print(counter)
         return enriched_dataset
 
     def len(self):
@@ -362,22 +377,110 @@ class EnrichedGraphDataset(Dataset):
         return self.data_list[idx]
 
 
+# class DeepSet(nn.Module):
+#     def __init__(self, input_size, hidden_size, num_perturbations):
+#         super(DeepSet, self).__init__()
+#
+#         self.num_perturbations = num_perturbations
+#         # MLP for individual perturbations
+#         self.mlp_perturbation = nn.Sequential(
+#             nn.Linear(input_size, hidden_size),
+#             nn.ELU()
+#         )
+#
+#         # MLP for aggregation
+#         self.mlp_aggregation = nn.Sequential(
+#             nn.Linear(hidden_size, hidden_size),
+#             nn.ELU()
+#         )
+#
+#         self.reset_parameters()
+#
+#     def reset_parameters(self):
+#         for module in self.modules():
+#             if isinstance(module, nn.Linear):
+#                 nn.init.xavier_uniform_(module.weight)
+#                 nn.init.constant_(module.bias, 0)
+#
+#     def forward(self, input_data):
+#         # Apply MLP to each perturbation
+#         # print(input_data.shape)
+#         perturbation_outputs = torch.stack(
+#             [self.mlp_perturbation(input_data[:, i, :]) for i in range(self.num_perturbations)])
+#         # print(perturbation_outputs.shape)
+#         # Sum over perturbations
+#         aggregated_output = torch.sum(perturbation_outputs, dim=0)
+#         # print(aggregated_output.shape)
+#         # Apply MLP to the aggregated output
+#         final_output = self.mlp_aggregation(aggregated_output)
+#         return final_output
+#
+#
+# class SDGNN_DeepSet(nn.Module):
+#     def __init__(self, input_dim, hidden_dim, output_dim, dropout, num_perturbations):
+#         super(SDGNN_DeepSet, self).__init__()
+#
+#         self.deepset_aggregator = DeepSet(input_dim, hidden_dim, num_perturbations)
+#
+#         self.linear1 = nn.Linear(hidden_dim, hidden_dim * 2)
+#         self.bn1 = nn.BatchNorm1d(hidden_dim * 2)
+#         self.activation = nn.ELU()
+#         self.linear2 = nn.Linear(hidden_dim * 2, hidden_dim)
+#         self.bn2 = nn.BatchNorm1d(hidden_dim)
+#         self.linear3 = nn.Linear(hidden_dim, output_dim)
+#         self.dropout = dropout
+#
+#         self.reset_parameters()
+#
+#     def reset_parameters(self):
+#         self.linear1.reset_parameters()
+#         self.linear2.reset_parameters()
+#         self.linear3.reset_parameters()
+#
+#     def forward(self, data):
+#         x = data.x  # [num_perturbation, num_nodes, num_features]
+#         batch = data.batch
+#         # print(f'input: {x.shape}')
+#         aggregated_features = self.deepset_aggregator(x)
+#
+#         x = self.bn1(self.linear1(aggregated_features))
+#         x = self.activation(x)
+#
+#         x = self.bn2(self.linear2(x))
+#         x = self.activation(x)
+#         x = F.dropout(x, p=self.dropout, training=self.training)
+#
+#         x = global_add_pool(x, batch)
+#
+#         x = self.linear3(x)
+#
+#         return F.log_softmax(x, dim=-1)
+
 class DeepSet(nn.Module):
-    def __init__(self, input_size, hidden_size, num_perturbations):
+    def __init__(self, input_size, hidden_size, num_perturbations, max_nodes):
         super(DeepSet, self).__init__()
 
-        self.num_perturbations = num_perturbations
+        self.hidden_size = hidden_size
         # MLP for individual perturbations
         self.mlp_perturbation = nn.Sequential(
             nn.Linear(input_size, hidden_size),
+            nn.BatchNorm1d(hidden_size),
+            nn.ELU(),
+            nn.Linear(hidden_size, hidden_size),
             nn.ELU()
         )
 
         # MLP for aggregation
         self.mlp_aggregation = nn.Sequential(
             nn.Linear(hidden_size, hidden_size),
+            nn.BatchNorm1d(hidden_size),
+            nn.ELU(),
+            nn.Linear(hidden_size, hidden_size // 2),
             nn.ELU()
         )
+
+        self.num_perturbations = num_perturbations
+        self.max_nodes = max_nodes
 
         self.reset_parameters()
 
@@ -386,33 +489,43 @@ class DeepSet(nn.Module):
             if isinstance(module, nn.Linear):
                 nn.init.xavier_uniform_(module.weight)
                 nn.init.constant_(module.bias, 0)
+            if isinstance(module, nn.BatchNorm1d):
+                module.reset_parameters()
 
     def forward(self, input_data):
-        # Apply MLP to each perturbation
-        # print(input_data.shape)
-        perturbation_outputs = torch.stack(
-            [self.mlp_perturbation(input_data[:, i, :]) for i in range(self.num_perturbations)])
-        # print(perturbation_outputs.shape)
-        # Sum over perturbations
-        aggregated_output = torch.sum(perturbation_outputs, dim=0)
-        # print(aggregated_output.shape)
-        # Apply MLP to the aggregated output
+        batch_size = input_data.size(0)
+
+        x = self.mlp_perturbation(input_data)
+        # x_transformed = x.view(self.num_perturbations, input_data.size(0) // self.num_perturbations,
+        # self.hidden_size)  for batch=1
+
+        # x_transformed = x.view(batch_size // self.num_perturbations, self.num_perturbations, self.hidden_size)
+        x_transformed = x.view(-1, self.num_perturbations, self.max_nodes, self.hidden_size)
+        aggregated_output = torch.sum(x_transformed, dim=1)
+        aggregated_output = aggregated_output.view(-1, self.hidden_size)
+        # aggregated_output = torch.sum(x_transformed, dim=0) va in bara batch=1 bod
+
         final_output = self.mlp_aggregation(aggregated_output)
+
         return final_output
 
 
-class SDGNN_DeepSet(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim, dropout, num_perturbations):
-        super(SDGNN_DeepSet, self).__init__()
+class SDGNN_Deepset(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim, dropout, num_perturbations, max_nodes):
+        super(SDGNN_Deepset, self).__init__()
 
-        self.deepset_aggregator = DeepSet(input_dim, hidden_dim, num_perturbations)
+        self.num_perturbations = num_perturbations
 
-        self.linear1 = nn.Linear(hidden_dim, hidden_dim * 2)
-        self.bn1 = nn.BatchNorm1d(hidden_dim * 2)
-        self.activation = nn.ELU()
-        self.linear2 = nn.Linear(hidden_dim * 2, hidden_dim)
-        self.bn2 = nn.BatchNorm1d(hidden_dim)
-        self.linear3 = nn.Linear(hidden_dim, output_dim)
+        self.deepset_aggregator = DeepSet(input_dim, hidden_dim, num_perturbations, max_nodes)
+
+        self.linear1 = nn.Linear(hidden_dim, hidden_dim)
+        self.bn1 = nn.BatchNorm1d(hidden_dim)
+        self.elu = nn.ELU()
+        self.linear2 = nn.Linear(hidden_dim, hidden_dim // 2)
+        self.bn2 = nn.BatchNorm1d(hidden_dim // 2)
+        self.linear3 = nn.Linear(hidden_dim // 2, hidden_dim // 4)
+        self.bn3 = nn.BatchNorm1d(hidden_dim // 4)
+        self.linear4 = nn.Linear(hidden_dim // 4, output_dim)
         self.dropout = dropout
 
         self.reset_parameters()
@@ -421,23 +534,29 @@ class SDGNN_DeepSet(nn.Module):
         self.linear1.reset_parameters()
         self.linear2.reset_parameters()
         self.linear3.reset_parameters()
+        self.linear4.reset_parameters()
+        self.bn1.reset_parameters()
+        self.bn2.reset_parameters()
+        self.bn3.reset_parameters()
 
     def forward(self, data):
-        x = data.x  # [num_perturbation, num_nodes, num_features]
+        x = data.x
         batch = data.batch
-        # print(f'input: {x.shape}')
+
         aggregated_features = self.deepset_aggregator(x)
+        batch = batch.view(-1, self.num_perturbations).to(torch.float).mean(dim=1).long()
 
-        x = self.bn1(self.linear1(aggregated_features))
-        x = self.activation(x)
+        x = self.elu(self.bn1(self.linear1(aggregated_features)))
 
-        x = self.bn2(self.linear2(x))
-        x = self.activation(x)
+        x = self.elu(self.bn2(self.linear2(x)))
         x = F.dropout(x, p=self.dropout, training=self.training)
 
         x = global_add_pool(x, batch)
 
-        x = self.linear3(x)
+        x = self.elu(self.bn3(self.linear3(x)))
+        x = F.dropout(x, p=self.dropout, training=self.training)
+
+        x = self.linear4(x)
 
         return F.log_softmax(x, dim=-1)
 
@@ -491,6 +610,7 @@ class SDGNN(nn.Module):
 
         x = self.linear3(x)
         x = self.activation(x)
+        x = F.dropout(x, p=self.dropout, training=self.training)
 
         x = self.linear4(x)
         return F.log_softmax(x, dim=-1)
@@ -531,14 +651,14 @@ def count_parameters(model):
 def main(config=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, choices=['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES',
-                                                        'PTC_GIN', 'NCI1', 'NCI109', 'COLLAB'], default='IMDB-BINARY',
+                                                        'PTC_GIN', 'NCI1', 'NCI109', 'COLLAB'], default='PROTEINS',
                         help="Options are ['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES', 'PTC_GIN', "
                              "'NCI1', 'NCI109']")
     # parser.add_argument('--batch_size', type=int, default=32, help='batch size')
-    # parser.add_argument('--seed', type=int, default=1234, help='seed for reproducibility')
+    parser.add_argument('--seed', type=int, default=0, help='seed for reproducibility')
     # parser.add_argument('--lr', type=float, default=0.01, help='learning rate')
     # parser.add_argument('--dropout', type=float, choices=[0.5, 0.2], default=0.2, help='dropout probability')
-    parser.add_argument('--epochs', type=int, default=200, help='maximum number of epochs')
+    parser.add_argument('--epochs', type=int, default=50, help='maximum number of epochs')
     # parser.add_argument('--min_delta', type=float, default=0.001, help='min_delta in early stopping')
     # parser.add_argument('--patience', type=int, default=100, help='patience in early stopping')
     parser.add_argument('--agg', type=str, default="mean", choices=["mean", "concat", "deepset"],
@@ -546,6 +666,13 @@ def main(config=None):
     # parser.add_argument('--normalization', type=str, default='After', choices=['After', 'Before'],
     #                    help='Doing normalization before generation of perturbations or after')
     args = parser.parse_args()
+
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    random.seed(args.seed)
+    generator = torch.Generator()
+    generator.manual_seed(args.seed)
+
     wandb.login()
     dataset = get_dataset(args)
     print(dataset)
@@ -579,113 +706,136 @@ def main(config=None):
         config = wandb.config
         print(args)
         start_time = time.time()
+        print("Preprocessing ...")
         enriched_dataset = EnrichedGraphDataset(os.path.join(current_path, 'enriched_dataset'), dataset, p=p,
-                                                num_perturbations=num_perturbations, max_nodes=max_nodes, config=config,
+                                                num_perturbations=num_perturbations, config=config,
                                                 args=args)
+
         end_time = time.time()
         elapsed_time = end_time - start_time
-        print(f"Time taken: {elapsed_time:.2f} seconds")
+        print(f"Done! Time taken: {elapsed_time:.2f} seconds")
 
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        # device = torch.device('cpu')
         print(f'Device: {device}')
-        seeds_to_test = [0, 64]
+        # seeds_to_test = [args.seed]
         n_splits = 10
-        final_acc = []
-        final_std = []
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
 
-        for seed in seeds_to_test:
-            print(f'Seed: {seed}')
-            print("==============")
-            torch.manual_seed(seed)
-            np.random.seed(seed)
-            all_validation_accuracies = []
-            time_seed = []
+        # final_acc = []
+        # final_std = []
 
-            skf_splits = separate_data(len(enriched_dataset), seed)
+        # for seed in seeds_to_test:
+        # print(f'Seed: {seed}')
+        # print("==============")
+        # torch.manual_seed(seed)
+        # np.random.seed(seed)
+        # generator = torch.Generator()
+        # generator.manual_seed(seed)
+        all_validation_accuracies = []
+        time_seed = []
 
-            # Iterate through each fold
-            for fold, (train_indices, test_indices) in enumerate(skf_splits):
-                print(f'Fold {fold + 1}/{n_splits}:')
-                start_time_fold = time.time()
-                # Create data loaders for the current fold
-                train_loader = DataLoader(
-                    enriched_dataset[train_indices],
-                    sampler=RandomSampler(enriched_dataset[train_indices], replacement=True,
-                                          num_samples=int(
-                                              len(train_indices) * 50 / (len(train_indices) / config.batch_size))),
-                    batch_size=config.batch_size, drop_last=False,
-                    collate_fn=Collater(follow_batch=[], exclude_keys=[]))
+        skf_splits = separate_data(len(enriched_dataset), n_splits, args.seed)
 
-                test_loader = DataLoader(enriched_dataset[test_indices], batch_size=config.batch_size, shuffle=False)
+        if args.agg == "deepset":
+            model = SDGNN_Deepset(enriched_dataset.num_features, config.hidden_dim,
+                                  enriched_dataset.num_classes, config.dropout, num_perturbations, max_nodes).to(device)
+        else:
+            model = SDGNN(enriched_dataset.num_features, config.hidden_dim, enriched_dataset.num_classes,
+                          config.dropout, config.num_layers, config.batch_norm).to(device)
 
-                # Reinitialize the model for each fold
-                if args.agg == "deepset":
-                    model = SDGNN_DeepSet(enriched_dataset.num_features, config.hidden_dim,
-                                          enriched_dataset.num_classes, config.dropout, num_perturbations).to(device)
-                else:
-                    model = SDGNN(enriched_dataset.num_features, config.hidden_dim, enriched_dataset.num_classes,
-                                  config.dropout, config.num_layers, config.batch_norm).to(device)
+        # Iterate through each fold
+        for fold, (train_indices, test_indices) in enumerate(skf_splits):
+            model.reset_parameters()
+            print(f'Fold {fold + 1}/{n_splits}:')
+            start_time_fold = time.time()
+            # Create data loaders for the current fold
+            train_loader = DataLoader(
+                enriched_dataset[train_indices.tolist()],
+                sampler=RandomSampler(dataset[train_indices.tolist()], replacement=True,
+                                      num_samples=int(
+                                          len(train_indices.tolist()) * 50 / (
+                                                  len(train_indices.tolist()) / config.batch_size)),
+                                      generator=generator),
+                batch_size=config.batch_size, drop_last=False,
+                collate_fn=Collater(follow_batch=[], exclude_keys=[]))
 
-                if fold == 0:
-                    print(f'Model learnable parameters: {count_parameters(model)}')
-                optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
-                scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.5)
+            test_loader = DataLoader(enriched_dataset[test_indices.tolist()], batch_size=config.batch_size,
+                                     shuffle=False)
 
-                time_per_epoch = []
-                validation_accuracies = []
-                # Training loop for the current fold
-                for epoch in range(1, args.epochs + 1):
-                    start_time_epoch = time.time()
-                    lr = scheduler.optimizer.param_groups[0]['lr']
-                    train_loss = train(model, train_loader, optimizer, device)
-                    scheduler.step()
-                    memory_allocated = torch.cuda.max_memory_allocated(device) // (1024 ** 2)
-                    memory_reserved = torch.cuda.max_memory_reserved(device) // (1024 ** 2)
-                    test_acc = test(model, test_loader, device)
-                    end_time_epoch = time.time()
-                    elapsed_time_epoch = end_time_epoch - start_time_epoch
-                    time_per_epoch.append(elapsed_time_epoch)
-                    if epoch % 20 == 0:
-                        print(f'Epoch: {epoch:02d} | TrainLoss: {train_loss:.3f} | Test_acc: {test_acc:.3f} | Time'
-                              f'/epoch: {elapsed_time_epoch:.2f}')
-                    validation_accuracies.append(test_acc)
+            if fold == 0:
+                print(f'Model learnable parameters: {count_parameters(model)}')
+            optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
+            scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.5)
 
-                print(f'Average time per epoch in fold {fold} and seed {seed}: {np.mean(time_per_epoch)}')
-                print(f'Std time per epoch in fold {fold} and seed {seed}: {np.std(time_per_epoch)}')
-                all_validation_accuracies.append(validation_accuracies)
-                # Print fold training time
-                end_time_fold = time.time()
-                elapsed_time_fold = end_time_fold - start_time_fold
-                print(f'Time taken for training in seed {seed}, fold {fold + 1}: {elapsed_time_fold:.2f} seconds, '
-                      f'Memory Allocated: {memory_allocated} MB | Memory Reserved: {memory_reserved} MB')
-                time_seed.append(elapsed_time_fold)
-            print("=" * 30)
-            average_validation_curve = np.mean(all_validation_accuracies, axis=0)
-            max_avg_validation_acc_epoch = np.argmax(average_validation_curve)
-            best_epoch_mean = average_validation_curve[max_avg_validation_acc_epoch]
-            std_at_max_avg_validation_acc_epoch = np.std(
-                [validation_accuracies[max_avg_validation_acc_epoch] for validation_accuracies in
-                 all_validation_accuracies])
+            time_per_epoch = []
+            max_memory_allocated = 0
+            max_memory_reserved = 0
+            validation_accuracies = []
+            # Training loop for the current fold
+            for epoch in range(1, args.epochs + 1):
+                start_time_epoch = time.time()
+                lr = scheduler.optimizer.param_groups[0]['lr']
+                train_loss = train(model, train_loader, optimizer, device)
+                scheduler.step()
 
-            final_acc.append(best_epoch_mean)
-            final_std.append(std_at_max_avg_validation_acc_epoch)
+                memory_allocated = torch.cuda.max_memory_allocated(device) // (1024 ** 2)
+                memory_reserved = torch.cuda.max_memory_reserved(device) // (1024 ** 2)
+                max_memory_allocated = max(max_memory_allocated, memory_allocated)
+                max_memory_reserved = max(max_memory_reserved, memory_reserved)
 
-            print(f'Epoch {max_avg_validation_acc_epoch + 1} got maximum averaged validation accuracy in seed {seed}:'
-                  f'{best_epoch_mean}')
-            print(f'Standard Deviation for the results of epoch {max_avg_validation_acc_epoch + 1} over all the folds '
-                  f'in seed {seed}: {std_at_max_avg_validation_acc_epoch}')
-            print(f'Average time taken for each fold in seed {seed}: {np.mean(time_seed)}')
-            print(f'STD time taken for each fold in seed {seed}: {np.std(time_seed)}')
+                test_acc = test(model, test_loader, device)
+                end_time_epoch = time.time()
+                elapsed_time_epoch = end_time_epoch - start_time_epoch
+                time_per_epoch.append(elapsed_time_epoch)
+                if epoch % 25 == 0:
+                    print(f'Epoch: {epoch:02d} | TrainLoss: {train_loss:.3f} | Test_acc: {test_acc:.3f} | Time'
+                          f'/epoch: {elapsed_time_epoch:.2f} | Memory Allocated: {memory_allocated} MB | Memory '
+                          f'Reserved: {memory_reserved} MB | LR: {lr:.6f}')
+                validation_accuracies.append(test_acc)
 
+            print(f'Average time per epoch in fold {fold + 1} and seed {args.seed}: {np.mean(time_per_epoch)}')
+            print(f'Std time per epoch in fold {fold + 1} and seed {args.seed}: {np.std(time_per_epoch)}')
+            all_validation_accuracies.append(torch.tensor(validation_accuracies))
+            # Print fold training time
+            end_time_fold = time.time()
+            elapsed_time_fold = end_time_fold - start_time_fold
+            print(f'Time taken for training in seed {args.seed}, fold {fold + 1}: {elapsed_time_fold:.2f} seconds, '
+                  f'Max Memory Allocated: {max_memory_allocated} MB | Max Memory Reserved: {max_memory_reserved} MB')
+            time_seed.append(elapsed_time_fold)
         print("=" * 30)
-        final_accuracy = np.mean(final_acc)
-        print(f'Test accuracy for all the seeds: {final_accuracy}')
-        print(f'Std for all the seeds: {np.mean(final_std)}')
+        # average_validation_curve = np.mean(all_validation_accuracies, axis=0)
+        average_validation_curve = torch.stack(all_validation_accuracies, dim=0)
+        acc_mean = average_validation_curve.mean(dim=0)
+        best_epoch = acc_mean.argmax().item()
+        best_epoch_mean = average_validation_curve[:, best_epoch].mean()
+        # max_avg_validation_acc_epoch = np.argmax(average_validation_curve)
+        # best_epoch_mean = average_validation_curve[max_avg_validation_acc_epoch]
+        # std_at_max_avg_validation_acc_epoch = np.std(
+        #     [validation_accuracies[max_avg_validation_acc_epoch] for validation_accuracies in
+        #      all_validation_accuracies], ddof=1)
+        std_at_max_avg_validation_acc_epoch = average_validation_curve[:, best_epoch].std()
+
+        # final_acc.append(best_epoch_mean)
+        # final_std.append(std_at_max_avg_validation_acc_epoch)
+
+        print(f'Epoch {best_epoch + 1} got maximum averaged validation accuracy in seed {args.seed}: '
+              f'{best_epoch_mean}')
+        print(f'Standard Deviation for the results of epoch {best_epoch + 1} over all the folds '
+              f'in seed {args.seed}: {std_at_max_avg_validation_acc_epoch}')
+        print(f'Average time taken for each fold in seed {args.seed}: {np.mean(time_seed)}')
+        print(f'STD time taken for each fold in seed {args.seed}: {np.std(time_seed)}')
+
+        # print("=" * 30)
+        # final_accuracy = np.mean(final_acc)
+        # print(f'Test accuracy for all the seeds: {final_accuracy}')
+        # print(f'Std for all the seeds: {np.mean(final_std)}')
         wandb.log(
-            {"Test Accuracy for all the seeds": final_accuracy,
-             "Std for all the seeds": np.mean(final_std)
+            {"Test Accuracy": best_epoch_mean,
+             "Std": std_at_max_avg_validation_acc_epoch
              })
 
 
 if __name__ == "__main__":
-    wandb.agent(sweep_id, main, count=30)
+    wandb.agent(sweep_id, main, count=1)
