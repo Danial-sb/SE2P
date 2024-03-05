@@ -250,12 +250,12 @@ def diffusion(adj_perturbed, feature_matrix, config, seed):
 
 
 class EnrichedGraphDataset(Dataset):
-    def __init__(self, root, dataset, p, num_perturbations, config, args):
+    def __init__(self, root, dataset, p, num_perturbations, max_nodes, config, args):
         super(EnrichedGraphDataset, self).__init__(root, transform=None, pre_transform=None)
         # self.k = k
         self.p = p
         self.num_perturbations = num_perturbations
-        # self.max_nodes = max_nodes
+        self.max_nodes = max_nodes
         self.data_list = self.process_dataset(dataset, config, args)
 
     def pad_data(self, feature_matrix, adj):
@@ -475,7 +475,7 @@ class DeepSet(nn.Module):
             nn.Linear(hidden_size, hidden_size),
             nn.BatchNorm1d(hidden_size),
             nn.ELU(),
-            nn.Linear(hidden_size, hidden_size // 2),
+            nn.Linear(hidden_size, hidden_size),
             nn.ELU()
         )
 
@@ -651,7 +651,7 @@ def count_parameters(model):
 def main(config=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, choices=['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES',
-                                                        'PTC_GIN', 'NCI1', 'NCI109', 'COLLAB'], default='PROTEINS',
+                                                        'PTC_GIN', 'NCI1', 'NCI109', 'COLLAB'], default='MUTAG',
                         help="Options are ['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES', 'PTC_GIN', "
                              "'NCI1', 'NCI109']")
     # parser.add_argument('--batch_size', type=int, default=32, help='batch size')
@@ -661,7 +661,7 @@ def main(config=None):
     parser.add_argument('--epochs', type=int, default=50, help='maximum number of epochs')
     # parser.add_argument('--min_delta', type=float, default=0.001, help='min_delta in early stopping')
     # parser.add_argument('--patience', type=int, default=100, help='patience in early stopping')
-    parser.add_argument('--agg', type=str, default="mean", choices=["mean", "concat", "deepset"],
+    parser.add_argument('--agg', type=str, default="deepset", choices=["mean", "concat", "deepset"],
                         help='Method for aggregating the perturbation')
     # parser.add_argument('--normalization', type=str, default='After', choices=['After', 'Before'],
     #                    help='Doing normalization before generation of perturbations or after')
@@ -708,7 +708,7 @@ def main(config=None):
         start_time = time.time()
         print("Preprocessing ...")
         enriched_dataset = EnrichedGraphDataset(os.path.join(current_path, 'enriched_dataset'), dataset, p=p,
-                                                num_perturbations=num_perturbations, config=config,
+                                                num_perturbations=num_perturbations, max_nodes=max_nodes, config=config,
                                                 args=args)
 
         end_time = time.time()
@@ -738,15 +738,22 @@ def main(config=None):
 
         skf_splits = separate_data(len(enriched_dataset), n_splits, args.seed)
 
-        if args.agg == "deepset":
-            model = SDGNN_Deepset(enriched_dataset.num_features, config.hidden_dim,
-                                  enriched_dataset.num_classes, config.dropout, num_perturbations, max_nodes).to(device)
-        else:
-            model = SDGNN(enriched_dataset.num_features, config.hidden_dim, enriched_dataset.num_classes,
-                          config.dropout, config.num_layers, config.batch_norm).to(device)
+        # if args.agg == "deepset":
+        #     model = SDGNN_Deepset(enriched_dataset.num_features, config.hidden_dim,
+        #                           enriched_dataset.num_classes, config.dropout, num_perturbations, max_nodes).to(device)
+        # else:
+        #     model = SDGNN(enriched_dataset.num_features, config.hidden_dim, enriched_dataset.num_classes,
+        #                   config.dropout, config.num_layers, config.batch_norm).to(device)
 
         # Iterate through each fold
         for fold, (train_indices, test_indices) in enumerate(skf_splits):
+            if args.agg == "deepset":
+                model = SDGNN_Deepset(enriched_dataset.num_features, config.hidden_dim,
+                                      enriched_dataset.num_classes, config.dropout, num_perturbations, max_nodes).to(
+                    device)
+            else:
+                model = SDGNN(enriched_dataset.num_features, config.hidden_dim, enriched_dataset.num_classes,
+                              config.dropout, config.num_layers, config.batch_norm).to(device)
             model.reset_parameters()
             print(f'Fold {fold + 1}/{n_splits}:')
             start_time_fold = time.time()
