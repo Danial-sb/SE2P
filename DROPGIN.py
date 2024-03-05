@@ -18,7 +18,7 @@ from test_tube import HyperOptArgumentParser
 from ptc_dataset import PTCDataset
 from Preprocessed_DropGNN import FeatureDegree
 
-logging.basicConfig(filename='log/GCN_COLLAB.log', level=logging.INFO, format='%(asctime)s - %(message)s')
+logging.basicConfig(filename='log/GCN_IMDBM.log', level=logging.INFO, format='%(asctime)s - %(message)s')
 
 
 def main(args, cluster=None):
@@ -622,7 +622,7 @@ def main(args, cluster=None):
 if __name__ == '__main__':
     parser = HyperOptArgumentParser(strategy='grid_search')
     parser.add_argument('--dataset', type=str, choices=['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES',
-                                                        'PTC_GIN', 'NCI109', 'COLLAB'], default='COLLAB',
+                                                        'PTC_GIN', 'NCI109', 'COLLAB'], default='IMDB-MULTI',
                         help="Options are ['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES', 'PTC_GIN']")
     parser.opt_list('--dropout', type=float, default=0.0, tunable=True, options=[0.5, 0.0])
     parser.opt_list('--batch_size', type=int, default=128, tunable=True, options=[32, 128])
