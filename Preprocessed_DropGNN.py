@@ -29,17 +29,17 @@ sweep_config = {
     "metric": {"name": "test_acc", "goal": "maximize"},
     "parameters": {
         "lr": {"values": [0.01]},
-        "num_layers": {"values": [4]},
-        "batch_norm": {"values": [True]},
-        "batch_size": {"values": [32]},
-        "dropout": {"values": [0.5]},
+        "num_layers": {"values": [2, 3, 4]},
+        "batch_norm": {"values": [True, False]},
+        "batch_size": {"values": [32, 64, 128]},
+        "dropout": {"values": [0.0, 0.5]},
         "normalization": {"values": ["After"]},
-        "k": {"values": [2]},
+        "k": {"values": [2, 3]},
         "sum_or_cat": {"values": ["cat"]},
-        "hidden_dim": {"values": [32]}
+        "hidden_dim": {"values": [16, 32, 64]}
     }
 }
-sweep_id = wandb.sweep(sweep_config, project="OGB_molhiv")
+sweep_id = wandb.sweep(sweep_config, project="SDGNN_PTC_New")
 
 
 class FeatureDegree(BaseTransform):
@@ -300,7 +300,7 @@ class EnrichedGraphDataset(Dataset):
                 #     max_size = max(adj.size(0), feature_matrix.size(0))
                 #     pad_amount = max_size - adj.size(0)
                 #     adj = pad(adj, (0, pad_amount, 0, pad_amount), mode='constant', value=0)
-                adj = adj.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
+                adj = adj.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()  # TODO move this to the  function
                 perturbed_adj = generate_perturbation(adj, self.p, args.seed)
                 feature_matrices_of_perts = diffusion(perturbed_adj, feature_matrix, config, args.seed)
                 final_feature_of_graph = feature_matrices_of_perts.view(-1, feature_matrices_of_perts.size(
@@ -482,15 +482,15 @@ class DeepSet(nn.Module):
         self.num_perturbations = num_perturbations
         self.max_nodes = max_nodes
 
-        self.reset_parameters()
+        # self.reset_parameters()
 
-    def reset_parameters(self):
-        for module in self.modules():
-            if isinstance(module, nn.Linear):
-                nn.init.xavier_uniform_(module.weight)
-                nn.init.constant_(module.bias, 0)
-            if isinstance(module, nn.BatchNorm1d):
-                module.reset_parameters()
+    # def reset_parameters(self):
+    #     for module in self.modules():
+    #         if isinstance(module, nn.Linear):
+    #             nn.init.xavier_uniform_(module.weight)
+    #             nn.init.constant_(module.bias, 0)
+    #         if isinstance(module, nn.BatchNorm1d):
+    #             module.reset_parameters()
 
     def forward(self, input_data):
         batch_size = input_data.size(0)
@@ -531,13 +531,11 @@ class SDGNN_Deepset(nn.Module):
         self.reset_parameters()
 
     def reset_parameters(self):
-        self.linear1.reset_parameters()
-        self.linear2.reset_parameters()
-        self.linear3.reset_parameters()
-        self.linear4.reset_parameters()
-        self.bn1.reset_parameters()
-        self.bn2.reset_parameters()
-        self.bn3.reset_parameters()
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                m.reset_parameters()
+            elif isinstance(m, nn.BatchNorm1d):
+                m.reset_parameters()
 
     def forward(self, data):
         x = data.x
@@ -651,17 +649,17 @@ def count_parameters(model):
 def main(config=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, choices=['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES',
-                                                        'PTC_GIN', 'NCI1', 'NCI109', 'COLLAB'], default='MUTAG',
+                                                        'PTC_GIN', 'NCI1', 'NCI109', 'COLLAB'], default='PTC_GIN',
                         help="Options are ['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES', 'PTC_GIN', "
                              "'NCI1', 'NCI109']")
     # parser.add_argument('--batch_size', type=int, default=32, help='batch size')
     parser.add_argument('--seed', type=int, default=0, help='seed for reproducibility')
     # parser.add_argument('--lr', type=float, default=0.01, help='learning rate')
     # parser.add_argument('--dropout', type=float, choices=[0.5, 0.2], default=0.2, help='dropout probability')
-    parser.add_argument('--epochs', type=int, default=50, help='maximum number of epochs')
+    parser.add_argument('--epochs', type=int, default=350, help='maximum number of epochs')
     # parser.add_argument('--min_delta', type=float, default=0.001, help='min_delta in early stopping')
     # parser.add_argument('--patience', type=int, default=100, help='patience in early stopping')
-    parser.add_argument('--agg', type=str, default="deepset", choices=["mean", "concat", "deepset"],
+    parser.add_argument('--agg', type=str, default="mean", choices=["mean", "concat", "deepset"],
                         help='Method for aggregating the perturbation')
     # parser.add_argument('--normalization', type=str, default='After', choices=['After', 'Before'],
     #                    help='Doing normalization before generation of perturbations or after')
@@ -738,22 +736,15 @@ def main(config=None):
 
         skf_splits = separate_data(len(enriched_dataset), n_splits, args.seed)
 
-        # if args.agg == "deepset":
-        #     model = SDGNN_Deepset(enriched_dataset.num_features, config.hidden_dim,
-        #                           enriched_dataset.num_classes, config.dropout, num_perturbations, max_nodes).to(device)
-        # else:
-        #     model = SDGNN(enriched_dataset.num_features, config.hidden_dim, enriched_dataset.num_classes,
-        #                   config.dropout, config.num_layers, config.batch_norm).to(device)
+        if args.agg == "deepset":
+            model = SDGNN_Deepset(enriched_dataset.num_features, config.hidden_dim,
+                                  enriched_dataset.num_classes, config.dropout, num_perturbations, max_nodes).to(device)
+        else:
+            model = SDGNN(enriched_dataset.num_features, config.hidden_dim, enriched_dataset.num_classes,
+                          config.dropout, config.num_layers, config.batch_norm).to(device)
 
         # Iterate through each fold
         for fold, (train_indices, test_indices) in enumerate(skf_splits):
-            if args.agg == "deepset":
-                model = SDGNN_Deepset(enriched_dataset.num_features, config.hidden_dim,
-                                      enriched_dataset.num_classes, config.dropout, num_perturbations, max_nodes).to(
-                    device)
-            else:
-                model = SDGNN(enriched_dataset.num_features, config.hidden_dim, enriched_dataset.num_classes,
-                              config.dropout, config.num_layers, config.batch_norm).to(device)
             model.reset_parameters()
             print(f'Fold {fold + 1}/{n_splits}:')
             start_time_fold = time.time()
@@ -800,6 +791,7 @@ def main(config=None):
                     print(f'Epoch: {epoch:02d} | TrainLoss: {train_loss:.3f} | Test_acc: {test_acc:.3f} | Time'
                           f'/epoch: {elapsed_time_epoch:.2f} | Memory Allocated: {memory_allocated} MB | Memory '
                           f'Reserved: {memory_reserved} MB | LR: {lr:.6f}')
+                wandb.log({"test acc":test_acc})
                 validation_accuracies.append(test_acc)
 
             print(f'Average time per epoch in fold {fold + 1} and seed {args.seed}: {np.mean(time_per_epoch)}')
@@ -845,4 +837,4 @@ def main(config=None):
 
 
 if __name__ == "__main__":
-    wandb.agent(sweep_id, main, count=1)
+    wandb.agent(sweep_id, main, count=35)

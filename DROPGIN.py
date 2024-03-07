@@ -18,7 +18,7 @@ from test_tube import HyperOptArgumentParser
 from ptc_dataset import PTCDataset
 from Preprocessed_DropGNN import FeatureDegree
 
-logging.basicConfig(filename='log/GCN_IMDBM.log', level=logging.INFO, format='%(asctime)s - %(message)s')
+logging.basicConfig(filename='log/DropGCN_IMDBM.log', level=logging.INFO, format='%(asctime)s - %(message)s')
 
 
 def main(args, cluster=None):
@@ -631,7 +631,7 @@ if __name__ == '__main__':
     # parser.add_argument('--batch_size', type=int, default=64, help='batch size')
     # parser.add_argument('--seed', type=int, default=1234, help='seed for reproducibility')
     parser.add_argument('--lr', type=float, default=0.01, help='learning rate')
-    parser.add_argument('--model', type=str, choices=['GIN', 'DropGIN', 'GCN', 'DropGCN'], default="GCN")
+    parser.add_argument('--model', type=str, choices=['GIN', 'DropGIN', 'GCN', 'DropGCN'], default="DropGCN")
     # parser.add_argument('--hidden_units', type=int, default=64, choices=[32, 64])
     # parser.add_argument('--dropout', type=float, choices=[0.5, 0.2], default=0.5, help='dropout probability')
     parser.add_argument('--epochs', type=int, default=350, help='maximum number of epochs')
