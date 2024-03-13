@@ -25,13 +25,13 @@ import wandb
 from ptc_dataset import PTCDataset
 
 sweep_config = {
-    "method": "bayes",
+    "method": "grid",
     "metric": {"name": "test_acc", "goal": "maximize"},
     "parameters": {
         "lr": {"values": [0.01]},
         "num_layers": {"values": [2, 3, 4]},
-        "batch_norm": {"values": [True, False]},
-        "batch_size": {"values": [32, 64, 128]},
+        # "batch_norm": {"values": [True, False]},
+        # "batch_size": {"values": [32, 64, 128]},
         "dropout": {"values": [0.0, 0.5]},
         "normalization": {"values": ["After"]},
         "k": {"values": [2, 3]},
@@ -39,7 +39,7 @@ sweep_config = {
         "hidden_dim": {"values": [16, 32, 64]}
     }
 }
-sweep_id = wandb.sweep(sweep_config, project="SDGNN_PTC_New")
+sweep_id = wandb.sweep(sweep_config, project="SDGNN_COLLAB_DS_New")
 
 
 class FeatureDegree(BaseTransform):
@@ -249,6 +249,25 @@ def diffusion(adj_perturbed, feature_matrix, config, seed):
     return feature_matrices_of_perturbations
 
 
+def diffusion_sgcn(adj_perturbed, feature_matrix, config, seed):
+    torch.manual_seed(seed)
+    enriched_feature_matrices = []
+    for perturbation in range(adj_perturbed.size(0)):
+        # Get the adjacency matrix for this perturbation
+        adj_matrix = adj_perturbed[perturbation]
+        feature_matrix_for_perturbation = feature_matrix.clone()
+
+        # Perform diffusion for 'k' steps
+        for _ in range(config.k):
+            feature_matrix_for_perturbation = torch.matmul(adj_matrix, feature_matrix_for_perturbation)
+
+        enriched_feature_matrices.append(feature_matrix_for_perturbation)
+
+    feature_matrices_of_perturbations = torch.stack(enriched_feature_matrices)
+
+    return feature_matrices_of_perturbations
+
+
 class EnrichedGraphDataset(Dataset):
     def __init__(self, root, dataset, p, num_perturbations, max_nodes, config, args):
         super(EnrichedGraphDataset, self).__init__(root, transform=None, pre_transform=None)
@@ -286,7 +305,7 @@ class EnrichedGraphDataset(Dataset):
             edge_index = data.edge_index
             feature_matrix = data.x.clone().float()  # Converted to float for ogb
 
-            if args.agg not in ["deepset", "mean", "concat"]:
+            if args.agg not in ["deepset", "mean", "concat", "sign", "sgcn"]:
                 raise ValueError("Invalid aggregation method specified")
 
             if config.normalization not in ["Before", "After"]:
@@ -361,6 +380,19 @@ class EnrichedGraphDataset(Dataset):
                     raise ValueError("NaN values encountered in normalized adjacency matrices.")
                 feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config, args.seed)
                 final_feature_of_graph = feature_matrices_of_perts.view(-1, feature_matrices_of_perts.size(-1)).clone()
+
+            elif args.agg == "sign":
+                adj = get_adj(edge_index, set_diag=False, symmetric_normalize=True)
+                adj = adj.unsqueeze(0).expand(1, -1, -1).clone()
+                final_feature_of_graph = diffusion(adj, feature_matrix, config, args.seed)
+                final_feature_of_graph = final_feature_of_graph.squeeze()
+
+            elif args.agg == "sgcn":
+                adj = get_adj(edge_index, set_diag=False, symmetric_normalize=True)
+                adj = adj.unsqueeze(0).expand(1, -1, -1).clone()
+                final_feature_of_graph = diffusion_sgcn(adj, feature_matrix, config, args.seed)
+                final_feature_of_graph = final_feature_of_graph.squeeze()
+
             else:
                 raise ValueError("Error in choosing hyper parameters")
 
@@ -493,7 +525,7 @@ class DeepSet(nn.Module):
     #             module.reset_parameters()
 
     def forward(self, input_data):
-        batch_size = input_data.size(0)
+        # batch_size = input_data.size(0)
 
         x = self.mlp_perturbation(input_data)
         # x_transformed = x.view(self.num_perturbations, input_data.size(0) // self.num_perturbations,
@@ -649,7 +681,7 @@ def count_parameters(model):
 def main(config=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, choices=['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES',
-                                                        'PTC_GIN', 'NCI1', 'NCI109', 'COLLAB'], default='PTC_GIN',
+                                                        'PTC_GIN', 'NCI1', 'NCI109', 'COLLAB'], default='COLLAB',
                         help="Options are ['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES', 'PTC_GIN', "
                              "'NCI1', 'NCI109']")
     # parser.add_argument('--batch_size', type=int, default=32, help='batch size')
@@ -659,7 +691,7 @@ def main(config=None):
     parser.add_argument('--epochs', type=int, default=350, help='maximum number of epochs')
     # parser.add_argument('--min_delta', type=float, default=0.001, help='min_delta in early stopping')
     # parser.add_argument('--patience', type=int, default=100, help='patience in early stopping')
-    parser.add_argument('--agg', type=str, default="mean", choices=["mean", "concat", "deepset"],
+    parser.add_argument('--agg', type=str, default="deepset", choices=["mean", "concat", "deepset", "sign", "sgcn"],
                         help='Method for aggregating the perturbation')
     # parser.add_argument('--normalization', type=str, default='After', choices=['After', 'Before'],
     #                    help='Doing normalization before generation of perturbations or after')
@@ -787,11 +819,11 @@ def main(config=None):
                 end_time_epoch = time.time()
                 elapsed_time_epoch = end_time_epoch - start_time_epoch
                 time_per_epoch.append(elapsed_time_epoch)
-                if epoch % 25 == 0:
+                if epoch % 25 == 0 or epoch == 1:
                     print(f'Epoch: {epoch:02d} | TrainLoss: {train_loss:.3f} | Test_acc: {test_acc:.3f} | Time'
                           f'/epoch: {elapsed_time_epoch:.2f} | Memory Allocated: {memory_allocated} MB | Memory '
                           f'Reserved: {memory_reserved} MB | LR: {lr:.6f}')
-                wandb.log({"test acc":test_acc})
+                wandb.log({"test acc": test_acc})
                 validation_accuracies.append(test_acc)
 
             print(f'Average time per epoch in fold {fold + 1} and seed {args.seed}: {np.mean(time_per_epoch)}')
@@ -837,4 +869,4 @@ def main(config=None):
 
 
 if __name__ == "__main__":
-    wandb.agent(sweep_id, main, count=35)
+    wandb.agent(sweep_id, main)
