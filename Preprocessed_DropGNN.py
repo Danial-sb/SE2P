@@ -737,7 +737,7 @@ def main(config=None):
         print(args)
         start_time = time.time()
         print("Preprocessing ...")
-        enriched_dataset = EnrichedGraphDataset(os.path.join(current_path, 'enriched_dataset'), dataset, p=p,
+        enriched_dataset = EnrichedGraphDataset(os.path.join(current_path, 'enriched_dataset'), dataset, p=p, # TODO make it in memory
                                                 num_perturbations=num_perturbations, max_nodes=max_nodes, config=config,
                                                 args=args)
 

@@ -7,59 +7,51 @@ import torch.nn.functional as F
 from torch.nn import Sequential, Linear, ReLU, GRU
 import torch_geometric.transforms as T
 from torch_geometric.datasets import QM9
+import torch.nn as nn
 from torch_geometric.nn import Set2Set
+from torch.nn.functional import pad
+from torch_geometric.nn import NNConv
 from torch_geometric.loader import DataLoader
-from torch_geometric.data import Data, Dataset
 from torch_scatter import scatter_mean
 from torch_geometric.utils import to_dense_adj
 from torch_geometric.utils import remove_self_loops, degree
-from torch_geometric.data import Data, Dataset
+from torch_geometric.data import Data, Dataset, InMemoryDataset
+import numpy as np
 import wandb
 
 sweep_config = {
-    "method": "bayes",
+    "method": "grid",
     "metric": {"name": "test_error", "goal": "minimize"},
     "parameters": {
-        "normalization": {"values": ["Before", "After"]},
-        "k": {"values": [2, 3, 4]},
-        "sum_or_cat": {"values": ["cat", "sum"]},
+        "normalization": {"values": ["After"]},
+        "k": {"values": [2]},
+        "sum_or_cat": {"values": ["cat"]},
+        "hidden_dim": {"values": [16, 32, 64]},
+        "batch_size": {"values": [32, 64, 128]},
     }
 }
-sweep_id = wandb.sweep(sweep_config, project="QM9")
+sweep_id = wandb.sweep(sweep_config, project="SDGNN_QM9")
 
 
-class MyTransform(object):
-    def __call__(self, data, args):
-        # Specify target.
-        data.y = data.y[:, args.target]
-        return data
-
-
-def get_adj(edge_index):
+def get_adj(edge_index, set_diag=True, symmetric_normalize=True):
+    # Convert to dense adjacency matrix
     adj = to_dense_adj(edge_index).squeeze()
-    identity_matrix = torch.eye(adj.shape[0])
-    adj_with_self_loops = adj + identity_matrix
-    return adj_with_self_loops
+
+    if set_diag:
+        identity_matrix = torch.eye(adj.shape[0])
+        adj = adj + identity_matrix
+    if symmetric_normalize:
+        D = torch.diag(adj.sum(dim=1))
+        D_inv_sqrt = torch.diag(1.0 / torch.sqrt(D.diagonal()))
+        adj = torch.mm(torch.mm(D_inv_sqrt, adj), D_inv_sqrt)
+        adj[torch.isnan(adj)] = 0.0
+
+    return adj
 
 
-def compute_symmetric_normalized_adj(edge_index):
-    #  Convert to dense adjacency matrix
-    adj = to_dense_adj(edge_index).squeeze()
-    identity_matrix = torch.eye(adj.shape[0])
-    adj_with_self_loops = adj + identity_matrix
-    # Compute the degree matrix (D) by summing over rows
-    D = torch.diag(adj_with_self_loops.sum(dim=1))
+def generate_perturbation(adj, p, seed):
+    torch.manual_seed(seed)
 
-    # Compute the inverse square root of the degree matrix (D_inv_sqrt)
-    D_inv_sqrt = torch.diag(1.0 / torch.sqrt(D.diagonal()))
-
-    # Apply symmetric normalization to the adjacency matrix
-    adj_normalized = torch.mm(torch.mm(D_inv_sqrt, adj_with_self_loops), D_inv_sqrt)
-
-    return adj_normalized
-
-
-def generate_perturbation(adj, p):
     all_adj = [adj[0].clone()]
     adj_perturbation = adj.clone()  # Make a copy of the original adjacency matrix for this perturbation
 
@@ -79,8 +71,6 @@ def generate_perturbation(adj, p):
 
 
 def compute_symmetric_normalized_perturbed_adj(adj_perturbed):  # This is for doing normalization after perturbation
-    # Convert to dense adjacency matrix
-    # adj = to_dense_adj(edge_index).squeeze()
     normalized_adj = []
     for perturbation in range(adj_perturbed.shape[0]):
         # Compute the degree matrix (D) by summing over rows
@@ -99,7 +89,8 @@ def compute_symmetric_normalized_perturbed_adj(adj_perturbed):  # This is for do
     return all_normalized_adj
 
 
-def diffusion(adj_perturbed, feature_matrix, config):
+def diffusion(adj_perturbed, feature_matrix, config, seed):
+    torch.manual_seed(seed)
     enriched_feature_matrices = []
     for perturbation in range(adj_perturbed.size(0)):
         # Get the adjacency matrix for this perturbation
@@ -116,8 +107,10 @@ def diffusion(adj_perturbed, feature_matrix, config):
         if config.sum_or_cat == "sum":
             internal_diffusion = torch.stack(internal_diffusion, dim=0)
             internal_diffusion = torch.sum(internal_diffusion, dim=0)
+        elif config.sum_or_cat == "cat":
+            internal_diffusion = torch.cat(internal_diffusion, dim=1)
         else:
-            internal_diffusion = torch.cat(internal_diffusion, dim=0)
+            raise ValueError("AGG in EQ1 should be either cat or sum")
 
         enriched_feature_matrices.append(internal_diffusion)
 
@@ -126,14 +119,40 @@ def diffusion(adj_perturbed, feature_matrix, config):
     return feature_matrices_of_perturbations
 
 
-class EnrichedGraphDataset(Dataset):
-    def __init__(self, root, dataset, p, num_perturbations, max_nodes, config, args):
+def diffusion_sgcn(adj_perturbed, feature_matrix, config, seed):
+    torch.manual_seed(seed)
+    enriched_feature_matrices = []
+    for perturbation in range(adj_perturbed.size(0)):
+        # Get the adjacency matrix for this perturbation
+        adj_matrix = adj_perturbed[perturbation]
+        feature_matrix_for_perturbation = feature_matrix.clone()
+
+        # Perform diffusion for 'k' steps
+        for _ in range(config.k):
+            feature_matrix_for_perturbation = torch.matmul(adj_matrix, feature_matrix_for_perturbation)
+
+        enriched_feature_matrices.append(feature_matrix_for_perturbation)
+
+    feature_matrices_of_perturbations = torch.stack(enriched_feature_matrices)
+
+    return feature_matrices_of_perturbations
+
+
+class EnrichedGraphDataset(InMemoryDataset):
+    def __init__(self, root, name, dataset, p, num_perturbations, max_nodes, config, args):
         super(EnrichedGraphDataset, self).__init__(root, transform=None, pre_transform=None)
-        # self.k = k
+        self.name = name
         self.p = p
         self.num_perturbations = num_perturbations
         self.max_nodes = max_nodes
-        self.data_list = self.process_dataset(dataset, config, args)
+
+        if self._processed_file_exists():
+            print("Dataset was already in memory.")
+            self.data, self.slices = torch.load(self.processed_paths[0])
+        else:
+            print("Preprocessing ...")
+            self.data_list = self.process_dataset(dataset, config, args)
+            self.data, self.slices = torch.load(self.processed_paths[0])
 
     def pad_data(self, feature_matrix, adj):
         num_nodes = feature_matrix.size(0)
@@ -153,84 +172,218 @@ class EnrichedGraphDataset(Dataset):
         return feature_matrix, adj
 
     def process_dataset(self, dataset, config, args):
-        # dataset = TUDataset(self.root, name)
-        enriched_dataset = []
-        final_feature_of_graph = None
+        torch.manual_seed(args.seed)
+        np.random.seed(args.seed)
 
+        enriched_dataset = []
+        # final_feature_of_graph = None
+        counter = 0
         for data in dataset:
             edge_index = data.edge_index
-            feature_matrix = data.x.clone()
+            feature_matrix = data.x.clone().float()  # Converted to float for ogb
+
+            if args.agg not in ["deepset", "mean", "concat", "sign", "sgcn"]:
+                raise ValueError("Invalid aggregation method specified")
+
+            if config.normalization not in ["Before", "After"]:
+                raise ValueError("Invalid normalization configuration")
 
             if args.agg == "deepset" and config.normalization == "Before":
-                adj = compute_symmetric_normalized_adj(edge_index)
-                feature_matrix, normalized_adj = self.pad_data(feature_matrix, adj)
-                normalized_adj_1 = normalized_adj.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
-                perturbed_adj = generate_perturbation(normalized_adj_1, self.p)
-                feature_matrices_of_perts = diffusion(perturbed_adj, feature_matrix, config)
-                final_feature_of_graph = feature_matrices_of_perts
+                adj = get_adj(edge_index, set_diag=False, symmetric_normalize=True)
+                feature_matrix, adj = self.pad_data(feature_matrix, adj)
+                # if adj.size(0) != feature_matrix.size(0): # for ogb
+                #     counter = counter + 1
+                #     max_size = max(adj.size(0), feature_matrix.size(0))
+                #     pad_amount = max_size - adj.size(0)
+                #     adj = pad(adj, (0, pad_amount, 0, pad_amount), mode='constant', value=0)
+                adj = adj.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()  # TODO move this to the  function
+                perturbed_adj = generate_perturbation(adj, self.p, args.seed)
+                feature_matrices_of_perts = diffusion(perturbed_adj, feature_matrix, config, args.seed)
+                final_feature_of_graph = feature_matrices_of_perts.view(-1, feature_matrices_of_perts.size(
+                    -1))  # remove view if wanted to use previous
 
             elif args.agg == "deepset" and config.normalization == "After":
-                adj = get_adj(edge_index)
-                feature_matrix, adjacency = self.pad_data(feature_matrix, adj)
-                adj = adjacency.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
-                perturbed_adj = generate_perturbation(adj, self.p)
+                adj = get_adj(edge_index, set_diag=False,
+                              symmetric_normalize=False)  # set diag here can be false or true
+                feature_matrix, adj = self.pad_data(feature_matrix, adj)
+                adj = adj.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
+                perturbed_adj = generate_perturbation(adj, self.p, args.seed)
                 normalized_adj = compute_symmetric_normalized_perturbed_adj(perturbed_adj)
                 if torch.isnan(normalized_adj).any():
                     raise ValueError("NaN values encountered in normalized adjacency matrices.")
-                feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config)
-                final_feature_of_graph = feature_matrices_of_perts
+                feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config, args.seed)
+                final_feature_of_graph = feature_matrices_of_perts.view(-1, feature_matrices_of_perts.size(-1))
 
             elif args.agg == "mean" and config.normalization == "Before":
-                normalized_adj = compute_symmetric_normalized_adj(edge_index)
-                normalized_adj_1 = normalized_adj.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
-                perturbed_adj = generate_perturbation(normalized_adj_1, self.p)
-                feature_matrices_of_perts = diffusion(perturbed_adj, feature_matrix, config)
+                adj = get_adj(edge_index, set_diag=False, symmetric_normalize=True)
+                if adj.size(0) != feature_matrix.size(0):
+                    counter = counter + 1
+                    max_size = max(adj.size(0), feature_matrix.size(0))
+                    pad_amount = max_size - adj.size(0)
+                    adj = pad(adj, (0, pad_amount, 0, pad_amount), mode='constant', value=0)
+                adj = adj.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
+                perturbed_adj = generate_perturbation(adj, self.p, args.seed)
+                feature_matrices_of_perts = diffusion(perturbed_adj, feature_matrix, config, args.seed)
                 final_feature_of_graph = feature_matrices_of_perts.mean(dim=0).clone()
 
             elif args.agg == "mean" and config.normalization == "After":
-                adjacency = get_adj(edge_index)
-                adj = adjacency.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
-                perturbed_adj = generate_perturbation(adj, self.p)
+                adj = get_adj(edge_index, set_diag=False, symmetric_normalize=False)
+                if adj.size(0) != feature_matrix.size(0):
+                    counter = counter + 1
+                    max_size = max(adj.size(0), feature_matrix.size(0))
+                    pad_amount = max_size - adj.size(0)
+                    adj = pad(adj, (0, pad_amount, 0, pad_amount), mode='constant', value=0)
+                adj = adj.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
+                perturbed_adj = generate_perturbation(adj, self.p, args.seed)
                 normalized_adj = compute_symmetric_normalized_perturbed_adj(perturbed_adj)
                 if torch.isnan(normalized_adj).any():
                     raise ValueError("NaN values encountered in normalized adjacency matrices.")
-                feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config)
+                feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config, args.seed)
                 final_feature_of_graph = feature_matrices_of_perts.mean(dim=0).clone()
 
             elif args.agg == "concat" and config.normalization == "Before":
-                normalized_adj = compute_symmetric_normalized_adj(edge_index)
-                normalized_adj_1 = normalized_adj.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
-                perturbed_adj = generate_perturbation(normalized_adj_1, self.p)
-                feature_matrices_of_perts = diffusion(perturbed_adj, feature_matrix, config)
+                adj = get_adj(edge_index, set_diag=True, symmetric_normalize=True)
+                adj = adj.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
+                perturbed_adj = generate_perturbation(adj, self.p, args.seed)
+                feature_matrices_of_perts = diffusion(perturbed_adj, feature_matrix, config, args.seed)
                 final_feature_of_graph = feature_matrices_of_perts.view(-1, feature_matrices_of_perts.size(-1)).clone()
 
             elif args.agg == "concat" and config.normalization == "After":
-                adjacency = get_adj(edge_index)
-                adj = adjacency.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
-                perturbed_adj = generate_perturbation(adj, self.p)
+                adj = get_adj(edge_index, set_diag=False, symmetric_normalize=False)
+                adj = adj.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
+                perturbed_adj = generate_perturbation(adj, self.p, args.seed)
                 normalized_adj = compute_symmetric_normalized_perturbed_adj(perturbed_adj)
                 if torch.isnan(normalized_adj).any():
                     raise ValueError("NaN values encountered in normalized adjacency matrices.")
-                feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config)
+                feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config, args.seed)
                 final_feature_of_graph = feature_matrices_of_perts.view(-1, feature_matrices_of_perts.size(-1)).clone()
 
-            enriched_data = Data(x=final_feature_of_graph, edge_index=edge_index, edge_attr=data.edge_attr, y=data.y,
-                                 pos=data.pos, idx=data.idx, name=data.name, z=data.z)
+            elif args.agg == "sign":
+                adj = get_adj(edge_index, set_diag=False, symmetric_normalize=True)
+                adj = adj.unsqueeze(0).expand(1, -1, -1).clone()
+                final_feature_of_graph = diffusion(adj, feature_matrix, config, args.seed)
+                final_feature_of_graph = final_feature_of_graph.squeeze()
+
+            elif args.agg == "sgcn":
+                adj = get_adj(edge_index, set_diag=False, symmetric_normalize=True)
+                adj = adj.unsqueeze(0).expand(1, -1, -1).clone()
+                final_feature_of_graph = diffusion_sgcn(adj, feature_matrix, config, args.seed)
+                final_feature_of_graph = final_feature_of_graph.squeeze()
+
+            else:
+                raise ValueError("Error in choosing hyper parameters")
+
+            enriched_data = Data(x=final_feature_of_graph, edge_index=edge_index, y=data.y)
             enriched_dataset.append(enriched_data)
 
-        return enriched_dataset
+        print(counter)
+        data, slices = self.collate(enriched_dataset)
+        path = self.processed_paths[0]
+        dir_name = os.path.dirname(path)
+        if not os.path.exists(dir_name):
+            os.makedirs(dir_name)
+        torch.save((data, slices), self.processed_paths[0])
 
-    def len(self):
-        return len(self.data_list)
+    def _processed_file_exists(self):
+        return os.path.exists(self.processed_paths[0])
 
-    def get(self, idx):
-        return self.data_list[idx]
+    @property
+    def processed_dir(self):
+        name = 'processed'
+        return os.path.join(self.root, self.name, name)
+
+    @property
+    def processed_file_names(self):
+        return ['data.pt']
+
+
+class DeepSet(nn.Module):
+    def __init__(self, input_size, hidden_size, num_perturbations, max_nodes):
+        super(DeepSet, self).__init__()
+
+        self.hidden_size = hidden_size
+        # MLP for individual perturbations
+        self.mlp_perturbation = nn.Sequential(
+            nn.Linear(input_size, hidden_size),
+            nn.BatchNorm1d(hidden_size),
+            nn.ELU(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.ELU()
+        )
+
+        # MLP for aggregation
+        self.mlp_aggregation = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.BatchNorm1d(hidden_size),
+            nn.ELU(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.ELU()
+        )
+
+        self.num_perturbations = num_perturbations
+        self.max_nodes = max_nodes
+
+    def forward(self, input_data):
+        # batch_size = input_data.size(0)
+
+        x = self.mlp_perturbation(input_data)
+        # x_transformed = x.view(self.num_perturbations, input_data.size(0) // self.num_perturbations,
+        # self.hidden_size)  for batch=1
+
+        # x_transformed = x.view(batch_size // self.num_perturbations, self.num_perturbations, self.hidden_size)
+        x_transformed = x.view(-1, self.num_perturbations, self.max_nodes, self.hidden_size)
+        aggregated_output = torch.sum(x_transformed, dim=1)
+        aggregated_output = aggregated_output.view(-1, self.hidden_size)
+        # aggregated_output = torch.sum(x_transformed, dim=0) va in bara batch=1 bod
+
+        final_output = self.mlp_aggregation(aggregated_output)
+
+        return final_output
+
+
+class Net_deepset(torch.nn.Module):
+    def __init__(self, enriched_dataset, hidden_dim, num_perturbations, max_nodes):
+        super(Net_deepset, self).__init__()
+
+        self.num_perturbations = num_perturbations
+
+        self.deepset_aggregator = DeepSet(enriched_dataset.num_features, hidden_dim, num_perturbations, max_nodes)
+        M_in, M_out = hidden_dim, 32
+        self.conv1 = Sequential(Linear(M_in, 128), ReLU(), Linear(128, M_out))
+
+        M_in, M_out = M_out, 64
+        self.conv2 = Sequential(Linear(M_in, 128), ReLU(), Linear(128, M_out))
+
+        M_in, M_out = M_out, 64
+        self.conv3 = Sequential(Linear(M_in, 128), ReLU(), Linear(128, M_out))
+
+        self.fc1 = torch.nn.Linear(64, 32)
+        self.fc2 = torch.nn.Linear(32, 16)
+        self.fc3 = torch.nn.Linear(16, 1)
+
+    def forward(self, data):
+        x = data.x
+        batch = data.batch
+
+        aggregated_features = self.deepset_aggregator(x)
+        batch = batch.view(-1, self.num_perturbations).to(torch.float).mean(dim=1).long()
+
+        x = F.elu(self.conv1(aggregated_features))
+        x = F.elu(self.conv2(x))
+        x = F.elu(self.conv3(x))
+
+        x = scatter_mean(x, batch, dim=0)
+
+        x = F.elu(self.fc1(x))
+        x = F.elu(self.fc2(x))
+        x = self.fc3(x)
+        return x.view(-1)
 
 
 class Net(torch.nn.Module):
-    def __init__(self, dataset):
+    def __init__(self, enriched_dataset):
         super(Net, self).__init__()
-        M_in, M_out = dataset.num_features, 32
+        M_in, M_out = enriched_dataset.num_features, 32
         self.conv1 = Sequential(Linear(M_in, 128), ReLU(), Linear(128, M_out))
 
         M_in, M_out = M_out, 64
@@ -289,13 +442,22 @@ def count_parameters(model):
 def main(config=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--target', default=0)
-    parser.add_argument('--hidden_dim', type=int, default=64)
-    parser.add_argument('--agg', type=str, default="deepset", choices=["mean", "concat", "deepset"],
+    # parser.add_argument('--hidden_dim', type=int, default=32)
+    parser.add_argument('--seed', type=int, default=0, help='seed for reproducibility')
+    parser.add_argument('--agg', type=str, default="deepset", choices=["mean", "concat", "deepset", "sign", "sgcn"],
                         help='Method for aggregating the perturbation')
     args = parser.parse_args()
     print(args)
     target = int(args.target)
     print('---- Target: {} ----'.format(target))
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+
+    class MyTransform(object):
+        def __call__(self, data):
+            # Specify target.
+            data.y = data.y[:, args.target]
+            return data
 
     path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', 'MPNN-QM9')
     transform = T.Compose([MyTransform(), T.Distance()])
@@ -305,7 +467,7 @@ def main(config=None):
     degs = []
     for g in dataset:
         num_nodes = g.num_nodes
-        deg = degree(g.edge_index[0], g.num_nodes, dtype=torch.long)
+        deg = degree(g.edge_index[0], num_nodes, dtype=torch.long)
         n.append(g.num_nodes)
         degs.append(deg.max())
     print(f'Mean Degree: {torch.stack(degs).float().mean()}')
@@ -326,9 +488,18 @@ def main(config=None):
 
     with wandb.init(config=config):
         config = wandb.config
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        print(device)
+        if args.agg == "mean":
+            name = "enriched_qm9_mean"
+        else:
+            name = "enriched_qm9_ds"
+
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
         start_time = time.time()
-        print("Preprocessing ...")
-        enriched_dataset = EnrichedGraphDataset(os.path.join(os.getcwd(), 'enriched_dataset'), dataset, p=p,
+        # print("Preprocessing ...")
+        enriched_dataset = EnrichedGraphDataset(os.path.join(os.getcwd(), 'enriched_dataset'), name, dataset, p=p,
                                                 num_perturbations=num_runs, max_nodes=max_nodes, args=args,
                                                 config=config)
         end_time = time.time()
@@ -338,19 +509,27 @@ def main(config=None):
         tenpercent = int(len(enriched_dataset) * 0.1)
         mean = torch.stack([data.y for data in enriched_dataset[tenpercent:]]).mean(dim=0)
         std = torch.stack([data.y for data in enriched_dataset[tenpercent:]]).std(dim=0)
+        mean = mean.to(device)
+        std = std.to(device)
 
         for data in enriched_dataset:
+            data.y = data.y.to(device)
             data.y = (data.y - mean) / std
 
         test_dataset = enriched_dataset[:tenpercent]
         val_dataset = enriched_dataset[tenpercent:2 * tenpercent]
         train_dataset = enriched_dataset[2 * tenpercent:]
-        test_loader = DataLoader(test_dataset, batch_size=64)
-        val_loader = DataLoader(val_dataset, batch_size=64)
-        train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+        test_loader = DataLoader(test_dataset, batch_size=config.batch_size)
+        val_loader = DataLoader(val_dataset, batch_size=config.batch_size)
+        train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True)
 
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        model = Net(enriched_dataset).to(device)
+        if args.agg == 'mean':
+            model = Net(enriched_dataset).to(device)
+        else:
+            print("deepset model selected")
+            model = Net_deepset(enriched_dataset, config.hidden_dim, num_perturbations=num_runs, max_nodes=max_nodes).to(
+                device)
+
         print(f"Number of trainable parameters: {count_parameters(model)}")
         optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min',
@@ -360,7 +539,8 @@ def main(config=None):
 
         print(model.__class__.__name__)
         best_val_error = None
-        for epoch in range(1, 301):
+        time_per_epoch = []
+        for epoch in range(1, 5):
             start_time = time.time()
             lr = scheduler.optimizer.param_groups[0]['lr']
             loss = train(model, train_loader, device, optimizer)
@@ -373,15 +553,19 @@ def main(config=None):
 
             end_time = time.time()
             epoch_time = end_time - start_time
+            time_per_epoch.append(epoch_time)
             print('Epoch: {:03d}, LR: {:7f}, Loss: {:.7f}, Validation MAE: {:.7f}, '
                   'Test MAE: {:.7f}, Time: {:.2f} seconds'.format(epoch, lr, loss, val_error, test_error, epoch_time),
                   flush=True)
             wandb.log({
                 "loss": loss,
-                "val_error": val_loader,
+                "val_error": val_error,
                 "test_error": test_error
             })
+            if epoch == 150:
+                print(np.mean(time_per_epoch))
+                print(np.std(time_per_epoch))
 
 
 if __name__ == "__main__":
-    wandb.agent(sweep_id, main, count=5)
+    wandb.agent(sweep_id, main)
