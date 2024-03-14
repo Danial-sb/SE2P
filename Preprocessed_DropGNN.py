@@ -20,7 +20,7 @@ from torch_geometric.loader.dataloader import Collater
 import time
 import argparse
 import os.path as osp
-from torch_geometric.data import Data
+from torch_geometric.data import Data, InMemoryDataset
 import wandb
 from ptc_dataset import PTCDataset
 
@@ -29,17 +29,17 @@ sweep_config = {
     "metric": {"name": "test_acc", "goal": "maximize"},
     "parameters": {
         "lr": {"values": [0.01]},
-        "num_layers": {"values": [2, 3, 4]},
-        # "batch_norm": {"values": [True, False]},
-        # "batch_size": {"values": [32, 64, 128]},
-        "dropout": {"values": [0.0, 0.5]},
+        "num_layers": {"values": [4]},
+        "batch_norm": {"values": [True]},
+        "batch_size": {"values": [64]},
+        "dropout": {"values": [0.5]},
         "normalization": {"values": ["After"]},
-        "k": {"values": [2, 3]},
+        "k": {"values": [3]},
         "sum_or_cat": {"values": ["cat"]},
-        "hidden_dim": {"values": [16, 32, 64]}
+        "hidden_dim": {"values": [32]}
     }
 }
-sweep_id = wandb.sweep(sweep_config, project="SDGNN_COLLAB_DS_New")
+sweep_id = wandb.sweep(sweep_config, project="MUTAG_SGCN")
 
 
 class FeatureDegree(BaseTransform):
@@ -268,14 +268,21 @@ def diffusion_sgcn(adj_perturbed, feature_matrix, config, seed):
     return feature_matrices_of_perturbations
 
 
-class EnrichedGraphDataset(Dataset):
-    def __init__(self, root, dataset, p, num_perturbations, max_nodes, config, args):
+class EnrichedGraphDataset(InMemoryDataset):
+    def __init__(self, root, name, dataset, p, num_perturbations, max_nodes, config, args):
         super(EnrichedGraphDataset, self).__init__(root, transform=None, pre_transform=None)
-        # self.k = k
+        self.name = name
         self.p = p
         self.num_perturbations = num_perturbations
         self.max_nodes = max_nodes
-        self.data_list = self.process_dataset(dataset, config, args)
+
+        if self._processed_file_exists():
+            print("Dataset was already in memory.")
+            self.data, self.slices = torch.load(self.processed_paths[0])
+        else:
+            print("Preprocessing ...")
+            self.data_list = self.process_dataset(dataset, config, args)
+            self.data, self.slices = torch.load(self.processed_paths[0])
 
     def pad_data(self, feature_matrix, adj):
         num_nodes = feature_matrix.size(0)
@@ -400,13 +407,24 @@ class EnrichedGraphDataset(Dataset):
             enriched_dataset.append(enriched_data)
 
         print(counter)
-        return enriched_dataset
+        data, slices = self.collate(enriched_dataset)
+        path = self.processed_paths[0]
+        dir_name = os.path.dirname(path)
+        if not os.path.exists(dir_name):
+            os.makedirs(dir_name)
+        torch.save((data, slices), self.processed_paths[0])
 
-    def len(self):
-        return len(self.data_list)
+    def _processed_file_exists(self):
+        return os.path.exists(self.processed_paths[0])
 
-    def get(self, idx):
-        return self.data_list[idx]
+    @property
+    def processed_dir(self):
+        name = 'processed'
+        return os.path.join(self.root, self.name, name)
+
+    @property
+    def processed_file_names(self):
+        return ['data.pt']
 
 
 # class DeepSet(nn.Module):
@@ -681,7 +699,7 @@ def count_parameters(model):
 def main(config=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, choices=['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES',
-                                                        'PTC_GIN', 'NCI1', 'NCI109', 'COLLAB'], default='COLLAB',
+                                                        'PTC_GIN', 'NCI1', 'NCI109', 'COLLAB'], default='MUTAG',
                         help="Options are ['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES', 'PTC_GIN', "
                              "'NCI1', 'NCI109']")
     # parser.add_argument('--batch_size', type=int, default=32, help='batch size')
@@ -691,7 +709,7 @@ def main(config=None):
     parser.add_argument('--epochs', type=int, default=350, help='maximum number of epochs')
     # parser.add_argument('--min_delta', type=float, default=0.001, help='min_delta in early stopping')
     # parser.add_argument('--patience', type=int, default=100, help='patience in early stopping')
-    parser.add_argument('--agg', type=str, default="deepset", choices=["mean", "concat", "deepset", "sign", "sgcn"],
+    parser.add_argument('--agg', type=str, default="sgcn", choices=["mean", "concat", "deepset", "sign", "sgcn"],
                         help='Method for aggregating the perturbation')
     # parser.add_argument('--normalization', type=str, default='After', choices=['After', 'Before'],
     #                    help='Doing normalization before generation of perturbations or after')
@@ -735,9 +753,10 @@ def main(config=None):
     with wandb.init(config=config):
         config = wandb.config
         print(args)
+        name = f"enriched_{args.dataset}_{args.agg}"
         start_time = time.time()
-        print("Preprocessing ...")
-        enriched_dataset = EnrichedGraphDataset(os.path.join(current_path, 'enriched_dataset'), dataset, p=p, # TODO make it in memory
+        # print("Preprocessing ...")
+        enriched_dataset = EnrichedGraphDataset(os.path.join(current_path, 'enriched_dataset'), name, dataset, p=p,
                                                 num_perturbations=num_perturbations, max_nodes=max_nodes, config=config,
                                                 args=args)
 
