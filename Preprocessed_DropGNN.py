@@ -29,17 +29,17 @@ sweep_config = {
     "metric": {"name": "test_acc", "goal": "maximize"},
     "parameters": {
         "lr": {"values": [0.01]},
-        "num_layers": {"values": [4]},
+        "num_layers": {"values": [2, 3, 4]},
         "batch_norm": {"values": [True]},
-        "batch_size": {"values": [64]},
-        "dropout": {"values": [0.5]},
+        "batch_size": {"values": [32, 64]},
+        "dropout": {"values": [0.0, 0.5]},
         "normalization": {"values": ["After"]},
-        "k": {"values": [3]},
+        "k": {"values": [2]},
         "sum_or_cat": {"values": ["cat"]},
-        "hidden_dim": {"values": [32]}
+        "hidden_dim": {"values": [16, 32, 64]}
     }
 }
-sweep_id = wandb.sweep(sweep_config, project="MUTAG_SGCN")
+sweep_id = wandb.sweep(sweep_config, project="SDGNN_moltox")
 
 
 class FeatureDegree(BaseTransform):
@@ -284,22 +284,22 @@ class EnrichedGraphDataset(InMemoryDataset):
             self.data_list = self.process_dataset(dataset, config, args)
             self.data, self.slices = torch.load(self.processed_paths[0])
 
-    def pad_data(self, feature_matrix, adj):
-        num_nodes = feature_matrix.size(0)
-
-        # Pad feature matrix if necessary
-        if num_nodes < self.max_nodes:
-            pad_size = self.max_nodes - num_nodes
-            feature_matrix = torch.cat([feature_matrix, torch.zeros(pad_size, feature_matrix.size(1))], dim=0)
-
-        # Pad adjacency if necessary
-        if adj.size(0) < self.max_nodes:
-            pad_size = self.max_nodes - adj.size(0)
-            zeros_pad = torch.zeros(pad_size, adj.size(1))
-            adj = torch.cat([adj, zeros_pad], dim=0)
-            adj = torch.cat([adj, torch.zeros(adj.size(0), pad_size)], dim=1)
-
-        return feature_matrix, adj
+    # def pad_data(self, feature_matrix, adj):
+    #     num_nodes = feature_matrix.size(0)
+    #
+    #     # Pad feature matrix if necessary
+    #     if num_nodes < self.max_nodes:
+    #         pad_size = self.max_nodes - num_nodes
+    #         feature_matrix = torch.cat([feature_matrix, torch.zeros(pad_size, feature_matrix.size(1))], dim=0)
+    #
+    #     # Pad adjacency if necessary
+    #     if adj.size(0) < self.max_nodes:
+    #         pad_size = self.max_nodes - adj.size(0)
+    #         zeros_pad = torch.zeros(pad_size, adj.size(1))
+    #         adj = torch.cat([adj, zeros_pad], dim=0)
+    #         adj = torch.cat([adj, torch.zeros(adj.size(0), pad_size)], dim=1)
+    #
+    #     return feature_matrix, adj
 
     def process_dataset(self, dataset, config, args):
         torch.manual_seed(args.seed)
@@ -311,6 +311,7 @@ class EnrichedGraphDataset(InMemoryDataset):
         for data in dataset:
             edge_index = data.edge_index
             feature_matrix = data.x.clone().float()  # Converted to float for ogb
+            num_nodes = feature_matrix.size(0)
 
             if args.agg not in ["deepset", "mean", "concat", "sign", "sgcn"]:
                 raise ValueError("Invalid aggregation method specified")
@@ -335,7 +336,17 @@ class EnrichedGraphDataset(InMemoryDataset):
             elif args.agg == "deepset" and config.normalization == "After":
                 adj = get_adj(edge_index, set_diag=False,
                               symmetric_normalize=False)  # set diag here can be false or true
-                feature_matrix, adj = self.pad_data(feature_matrix, adj)
+                if num_nodes < self.max_nodes:
+                    pad_size = self.max_nodes - num_nodes
+                    feature_matrix = torch.cat([feature_matrix, torch.zeros(pad_size, feature_matrix.size(1))], dim=0)
+
+                if adj.size(0) < self.max_nodes:
+                    pad_size = self.max_nodes - adj.size(0)
+                    zeros_pad = torch.zeros(pad_size, adj.size(1))
+                    adj = torch.cat([adj, zeros_pad], dim=0)
+                    adj = torch.cat([adj, torch.zeros(adj.size(0), pad_size)], dim=1)
+
+                # feature_matrix, adj = self.pad_data(feature_matrix, adj)
                 adj = adj.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
                 perturbed_adj = generate_perturbation(adj, self.p, args.seed)
                 normalized_adj = compute_symmetric_normalized_perturbed_adj(perturbed_adj)
@@ -699,7 +710,7 @@ def count_parameters(model):
 def main(config=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, choices=['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES',
-                                                        'PTC_GIN', 'NCI1', 'NCI109', 'COLLAB'], default='MUTAG',
+                                                        'PTC_GIN', 'NCI1', 'NCI109', 'COLLAB'], default='COLLAB',
                         help="Options are ['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES', 'PTC_GIN', "
                              "'NCI1', 'NCI109']")
     # parser.add_argument('--batch_size', type=int, default=32, help='batch size')
@@ -709,7 +720,7 @@ def main(config=None):
     parser.add_argument('--epochs', type=int, default=350, help='maximum number of epochs')
     # parser.add_argument('--min_delta', type=float, default=0.001, help='min_delta in early stopping')
     # parser.add_argument('--patience', type=int, default=100, help='patience in early stopping')
-    parser.add_argument('--agg', type=str, default="sgcn", choices=["mean", "concat", "deepset", "sign", "sgcn"],
+    parser.add_argument('--agg', type=str, default="deepset", choices=["mean", "concat", "deepset", "sign", "sgcn"],
                         help='Method for aggregating the perturbation')
     # parser.add_argument('--normalization', type=str, default='After', choices=['After', 'Before'],
     #                    help='Doing normalization before generation of perturbations or after')

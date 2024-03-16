@@ -20,6 +20,9 @@ def get_ogb(args):
     elif 'ogbg-molpcba' in args.dataset:
         path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', 'ogbg-molpcba')
         dataset = PygGraphPropPredDataset(name="ogbg-molpcba", root=path)
+    elif 'ogbg-moltox21' in args.dataset:
+        path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', 'ogbg-moltox21')
+        dataset = PygGraphPropPredDataset(name="ogbg-moltox21", root=path)
     else:
         raise ValueError("Invalid dataset name")
 
@@ -474,19 +477,19 @@ def test_ogb(loader, model, evaluator, device):
 
 def main(config=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', type=str, choices=['ogbg-molhiv', 'ogbg-molpcba'], default='ogbg-molhiv')
+    parser.add_argument('--dataset', type=str, choices=['ogbg-molhiv', 'ogbg-molpcba', "ogbg-moltox21"], default='ogbg-moltox21')
     parser.add_argument('--epochs', type=int, default=350, help='maximum number of epochs')
     parser.add_argument('--model', type=str, choices=['SDGNN_ogb', 'GIN_ogb', 'GCN_ogb', 'DropGIN_ogb',
-                                                      'DropGCN_ogb', 'SDGNN_deepset_ogb'], default='GCN_ogb')
+                                                      'DropGCN_ogb', 'SDGNN_deepset_ogb'], default='SDGNN_ogb')
     # parser.add_argument('--dropout', type=float, choices=[0.5, 0.0], default=0.5, help='dropout probability')
     parser.add_argument('--seed', type=int, default=0, help='seed for reproducibility')
     parser.add_argument('--agg', type=str, default="mean", choices=["mean", "concat", "deepset"],
                         help='Method for aggregating the perturbation')
     args = parser.parse_args()
 
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
-    random.seed(args.seed)
+    # torch.manual_seed(args.seed)
+    # np.random.seed(args.seed)
+    # random.seed(args.seed)
 
     dataset = get_ogb(args)
     print(dataset)
@@ -523,6 +526,9 @@ def main(config=None):
     # for seed in seeds_to_test:
     #     pass  # After doing tuning, you pass the seed as the argument to the func/classes instead of args
     with wandb.init(config=config):
+        torch.manual_seed(args.seed)
+        np.random.seed(args.seed)
+        random.seed(args.seed)
         config = wandb.config
         print(args)
         if args.model == 'SDGNN_ogb' or args.model == 'SDGNN_deepset_ogb':
@@ -539,6 +545,7 @@ def main(config=None):
             print(f"Done! Time taken: {elapsed_time:.2f} seconds")
 
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        # device = torch.device('cpu')
         print(f'Device: {device}')
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(args.seed)
@@ -555,24 +562,24 @@ def main(config=None):
 
         if args.model == 'SDGNN_ogb':
             model = SDGNN_ogb(enriched_dataset.num_features, config.hidden_dim,
-                              1 if args.dataset == 'ogbg-molhiv' else 128,
+                              1 if args.dataset == 'ogbg-molhiv' else (12 if args.dataset == 'ogbg-moltox21' else 128),
                               config.dropout, config.num_layers, config.batch_norm).to(device)
         elif args.model == 'GIN_ogb':
-            model = GIN_ogb(config, dataset, output=1 if args.dataset == 'ogbg-molhiv' else 128).to(device)
+            model = GIN_ogb(config, dataset, output=1 if args.dataset == 'ogbg-molhiv' else (12 if args.dataset == 'ogbg-moltox21' else 128)).to(device)
         elif args.model == 'GCN_ogb':
-            model = GCN_ogb(config, dataset, output=1 if args.dataset == 'ogbg-molhiv' else 128).to(device)
+            model = GCN_ogb(config, dataset, output=1 if args.dataset == 'ogbg-molhiv' else (12 if args.dataset == 'ogbg-moltox21' else 128)).to(device)
         elif args.model == 'DropGIN_ogb':
             model = DropGIN_ogb(config, dataset, num_perturbations, p,
-                                output=1 if args.dataset == 'ogbg-molhiv' else 128).to(
+                                output=1 if args.dataset == 'ogbg-molhiv' else (12 if args.dataset == 'ogbg-moltox21' else 128)).to(
                 device)
         elif args.model == 'DropGCN_ogb':
             model = DropGCN_ogb(config, dataset, num_perturbations, p,
-                                output=1 if args.dataset == 'ogbg-molhiv' else 128).to(
+                                output=1 if args.dataset == 'ogbg-molhiv' else (12 if args.dataset == 'ogbg-moltox21' else 128)).to(
                 device)
         else:
             model = SDGNN_Deepset_ogb(enriched_dataset.num_features, config.hidden_dim, config.dropout,
                                       num_perturbations, max_nodes,
-                                      output_dim=1 if args.dataset == 'ogbg-molhiv' else 128).to(device)
+                                      output_dim=1 if args.dataset == 'ogbg-molhiv' else (12 if args.dataset == 'ogbg-moltox21' else 128)).to(device)
 
         evaluator = Evaluator(name=args.dataset)
 
@@ -583,7 +590,7 @@ def main(config=None):
         start_outer = time.time()
         best_val_perf = test_perf = float('-inf')
         counter = 0
-        patience = 60
+        patience = 80
         max_memory_allocated = 0
         max_memory_reserved = 0
         for epoch in range(1, args.epochs + 1):  # TODO do it with curves, get the highest validation and
