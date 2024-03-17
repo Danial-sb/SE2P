@@ -480,16 +480,12 @@ def main(config=None):
     parser.add_argument('--dataset', type=str, choices=['ogbg-molhiv', 'ogbg-molpcba', "ogbg-moltox21"], default='ogbg-moltox21')
     parser.add_argument('--epochs', type=int, default=350, help='maximum number of epochs')
     parser.add_argument('--model', type=str, choices=['SDGNN_ogb', 'GIN_ogb', 'GCN_ogb', 'DropGIN_ogb',
-                                                      'DropGCN_ogb', 'SDGNN_deepset_ogb'], default='SDGNN_ogb')
+                                                      'DropGCN_ogb', 'SDGNN_deepset_ogb'], default='DropGCN_ogb')
     # parser.add_argument('--dropout', type=float, choices=[0.5, 0.0], default=0.5, help='dropout probability')
     parser.add_argument('--seed', type=int, default=0, help='seed for reproducibility')
     parser.add_argument('--agg', type=str, default="mean", choices=["mean", "concat", "deepset"],
                         help='Method for aggregating the perturbation')
     args = parser.parse_args()
-
-    # torch.manual_seed(args.seed)
-    # np.random.seed(args.seed)
-    # random.seed(args.seed)
 
     dataset = get_ogb(args)
     print(dataset)
@@ -520,126 +516,149 @@ def main(config=None):
     print(f'Sampling probability: {p}')
 
     current_path = os.getcwd()
-    # seeds_to_test = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-    # Average_validation_acc = []
-    # Average_test_acc = []
-    # for seed in seeds_to_test:
-    #     pass  # After doing tuning, you pass the seed as the argument to the func/classes instead of args
+    seeds_to_test = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    all_validation_acc = []
+    all_test_acc = []
+
     with wandb.init(config=config):
-        torch.manual_seed(args.seed)
-        np.random.seed(args.seed)
-        random.seed(args.seed)
-        config = wandb.config
-        print(args)
-        if args.model == 'SDGNN_ogb' or args.model == 'SDGNN_deepset_ogb':
-            name = f"enriched_{args.dataset}_{args.agg}"
-            start_time = time.time()
-            # print("Preprocessing ...")
-            enriched_dataset = EnrichedGraphDataset(os.path.join(current_path, 'enriched_dataset'), name, dataset, p=p,
-                                                    num_perturbations=num_perturbations, max_nodes=max_nodes,
-                                                    config=config,
-                                                    args=args)  # everything based on seed or no? yes I think
+        for seed in seeds_to_test:
+            torch.manual_seed(seed)
+            np.random.seed(seed)
+            random.seed(seed)
+            config = wandb.config
+            print(args)
 
-            end_time = time.time()
-            elapsed_time = end_time - start_time
-            print(f"Done! Time taken: {elapsed_time:.2f} seconds")
+            if args.model == 'SDGNN_ogb' or args.model == 'SDGNN_deepset_ogb':
+                name = f"enriched_{args.dataset}_{args.agg}"
+                start_time = time.time()
+                enriched_dataset = EnrichedGraphDataset(os.path.join(current_path, 'enriched_dataset'), name, dataset, p=p,
+                                                        num_perturbations=num_perturbations, max_nodes=max_nodes,
+                                                        config=config,
+                                                        args=args)  # everything based on seed or no? yes I think
+                end_time = time.time()
+                elapsed_time = end_time - start_time
+                print(f"Done! Time taken: {elapsed_time:.2f} seconds")
 
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        # device = torch.device('cpu')
-        print(f'Device: {device}')
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(args.seed)
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            # device = torch.device('cpu')
+            print(f'Device: {device}')
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(seed)
 
-        split_idx = dataset.get_idx_split()
-        if args.model == 'SDGNN_ogb' or args.model == 'SDGNN_deepset_ogb':
-            train_loader = DataLoader(enriched_dataset[split_idx["train"]], batch_size=config.batch_size, shuffle=True)
-            valid_loader = DataLoader(enriched_dataset[split_idx["valid"]], batch_size=config.batch_size, shuffle=False)
-            test_loader = DataLoader(enriched_dataset[split_idx["test"]], batch_size=config.batch_size, shuffle=False)
-        else:
-            train_loader = DataLoader(dataset[split_idx["train"]], batch_size=config.batch_size, shuffle=True)
-            valid_loader = DataLoader(dataset[split_idx["valid"]], batch_size=config.batch_size, shuffle=False)
-            test_loader = DataLoader(dataset[split_idx["test"]], batch_size=config.batch_size, shuffle=False)
-
-        if args.model == 'SDGNN_ogb':
-            model = SDGNN_ogb(enriched_dataset.num_features, config.hidden_dim,
-                              1 if args.dataset == 'ogbg-molhiv' else (12 if args.dataset == 'ogbg-moltox21' else 128),
-                              config.dropout, config.num_layers, config.batch_norm).to(device)
-        elif args.model == 'GIN_ogb':
-            model = GIN_ogb(config, dataset, output=1 if args.dataset == 'ogbg-molhiv' else (12 if args.dataset == 'ogbg-moltox21' else 128)).to(device)
-        elif args.model == 'GCN_ogb':
-            model = GCN_ogb(config, dataset, output=1 if args.dataset == 'ogbg-molhiv' else (12 if args.dataset == 'ogbg-moltox21' else 128)).to(device)
-        elif args.model == 'DropGIN_ogb':
-            model = DropGIN_ogb(config, dataset, num_perturbations, p,
-                                output=1 if args.dataset == 'ogbg-molhiv' else (12 if args.dataset == 'ogbg-moltox21' else 128)).to(
-                device)
-        elif args.model == 'DropGCN_ogb':
-            model = DropGCN_ogb(config, dataset, num_perturbations, p,
-                                output=1 if args.dataset == 'ogbg-molhiv' else (12 if args.dataset == 'ogbg-moltox21' else 128)).to(
-                device)
-        else:
-            model = SDGNN_Deepset_ogb(enriched_dataset.num_features, config.hidden_dim, config.dropout,
-                                      num_perturbations, max_nodes,
-                                      output_dim=1 if args.dataset == 'ogbg-molhiv' else (12 if args.dataset == 'ogbg-moltox21' else 128)).to(device)
-
-        evaluator = Evaluator(name=args.dataset)
-
-        print(f'Model learnable parameters: {count_parameters(model)}')
-        optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.5)
-
-        start_outer = time.time()
-        best_val_perf = test_perf = float('-inf')
-        counter = 0
-        patience = 80
-        max_memory_allocated = 0
-        max_memory_reserved = 0
-        for epoch in range(1, args.epochs + 1):  # TODO do it with curves, get the highest validation and
-                                                 # based on that report the test
-            start = time.time()
-            model.train()
-            train_loss = train_ogb(train_loader, model, optimizer, device=device)
-            wandb.log({"train_loss": train_loss})
-            scheduler.step()
-
-            memory_allocated = torch.cuda.max_memory_allocated(device) // (1024 ** 2)
-            memory_reserved = torch.cuda.max_memory_reserved(device) // (1024 ** 2)
-            max_memory_allocated = max(max_memory_allocated, memory_allocated)
-            max_memory_reserved = max(max_memory_reserved, memory_reserved)
-
-            model.eval()
-            val_perf = test_ogb(valid_loader, model, evaluator, device)
-            wandb.log({"val_perf": val_perf})
-            if val_perf > best_val_perf:
-                best_val_perf = val_perf
-                test_perf = test_ogb(test_loader, model, evaluator, device)
-                counter = 0
+            split_idx = dataset.get_idx_split()
+            if args.model == 'SDGNN_ogb' or args.model == 'SDGNN_deepset_ogb':
+                train_loader = DataLoader(enriched_dataset[split_idx["train"]], batch_size=config.batch_size, shuffle=True)
+                valid_loader = DataLoader(enriched_dataset[split_idx["valid"]], batch_size=config.batch_size, shuffle=False)
+                test_loader = DataLoader(enriched_dataset[split_idx["test"]], batch_size=config.batch_size, shuffle=False)
             else:
-                counter += 1
-                if counter >= patience:  # maybe remove when having several seeds
-                    print(f'Early stopping at epoch {epoch} as no improvement seen in {patience} epochs.')
-                    break
+                train_loader = DataLoader(dataset[split_idx["train"]], batch_size=config.batch_size, shuffle=True)
+                valid_loader = DataLoader(dataset[split_idx["valid"]], batch_size=config.batch_size, shuffle=False)
+                test_loader = DataLoader(dataset[split_idx["test"]], batch_size=config.batch_size, shuffle=False)
 
-            time_per_epoch = time.time() - start
+            if args.model == 'SDGNN_ogb':
+                model = SDGNN_ogb(enriched_dataset.num_features, config.hidden_dim,
+                                  1 if args.dataset == 'ogbg-molhiv' else (12 if args.dataset == 'ogbg-moltox21' else 128),
+                                  config.dropout, config.num_layers, config.batch_norm).to(device)
+            elif args.model == 'GIN_ogb':
+                model = GIN_ogb(config, dataset, output=1 if args.dataset == 'ogbg-molhiv' else (12 if args.dataset == 'ogbg-moltox21' else 128)).to(device)
+            elif args.model == 'GCN_ogb':
+                model = GCN_ogb(config, dataset, output=1 if args.dataset == 'ogbg-molhiv' else (12 if args.dataset == 'ogbg-moltox21' else 128)).to(device)
+            elif args.model == 'DropGIN_ogb':
+                model = DropGIN_ogb(config, dataset, num_perturbations, p,
+                                    output=1 if args.dataset == 'ogbg-molhiv' else (12 if args.dataset == 'ogbg-moltox21' else 128)).to(
+                    device)
+            elif args.model == 'DropGCN_ogb':
+                model = DropGCN_ogb(config, dataset, num_perturbations, p,
+                                    output=1 if args.dataset == 'ogbg-molhiv' else (12 if args.dataset == 'ogbg-moltox21' else 128)).to(
+                    device)
+            else:
+                model = SDGNN_Deepset_ogb(enriched_dataset.num_features, config.hidden_dim, config.dropout,
+                                          num_perturbations, max_nodes,
+                                          output_dim=1 if args.dataset == 'ogbg-molhiv' else (12 if args.dataset == 'ogbg-moltox21' else 128)).to(device)
 
-            print(f'Epoch: {epoch:03d}, Train Loss: {train_loss:.4f}, '
-                  f'Val: {val_perf:.4f}, Test: {test_perf:.4f}, Seconds: {time_per_epoch:.4f},'
-                  f' Memory allocated: {memory_allocated}, Memory Reserved: {memory_reserved}')
+            evaluator = Evaluator(name=args.dataset)
 
-        time_average_epoch = time.time() - start_outer
-        print(f' Vali: {best_val_perf}, Test: {test_perf}, Seconds/epoch: {time_average_epoch / args.epochs},'
-              f' Max memory allocated: {max_memory_allocated}, Max memory reserved: {max_memory_reserved}')
-        # Average_validation_acc.append(best_val_perf)
-        # Average_test_acc.append(test_perf)
+            print(f'Model learnable parameters: {count_parameters(model)}')
+            optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
+            scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.5)
+
+            start_outer = time.time()
+            best_val_perf = test_perf = float('-inf')
+            # counter = 0
+            # patience = 80
+            max_memory_allocated = 0
+            max_memory_reserved = 0
+            validation_perf = []
+            tests_perf = []
+            print(f'seed: {seed}')
+            print("=" * 10)
+
+            for epoch in range(1, args.epochs + 1):
+                start = time.time()
+                model.train()
+                train_loss = train_ogb(train_loader, model, optimizer, device=device)
+                wandb.log({"train_loss": train_loss})
+                scheduler.step()
+
+                memory_allocated = torch.cuda.max_memory_allocated(device) // (1024 ** 2)
+                memory_reserved = torch.cuda.max_memory_reserved(device) // (1024 ** 2)
+                max_memory_allocated = max(max_memory_allocated, memory_allocated)
+                max_memory_reserved = max(max_memory_reserved, memory_reserved)
+
+                model.eval()
+                val_perf = test_ogb(valid_loader, model, evaluator, device)
+                wandb.log({"val_perf": val_perf})
+                validation_perf.append(val_perf)
+                if val_perf > best_val_perf:
+                    best_val_perf = val_perf
+                    test_perf = test_ogb(test_loader, model, evaluator, device)
+                tests_perf.append(test_perf)
+                #     counter = 0
+                # else:
+                #     counter += 1
+                #     if counter >= patience:  # maybe remove when having several seeds
+                #         print(f'Early stopping at epoch {epoch} as no improvement seen in {patience} epochs.')
+                #         break
+
+                time_per_epoch = time.time() - start
+
+                if epoch % 25 == 0 or epoch == 1:
+                    print(f'Epoch: {epoch:03d}, Train Loss: {train_loss:.4f}, '
+                          f'Val: {val_perf:.4f}, Test: {test_perf:.4f}, Seconds: {time_per_epoch:.4f},'
+                          f' Memory allocated: {memory_allocated}, Memory Reserved: {memory_reserved}')
+
+            time_average_epoch = time.time() - start_outer
+            print(f'Best Validation in seed {seed}: {best_val_perf}, Test in seed {seed}: {test_perf}, Seconds/epoch: {time_average_epoch / args.epochs},'
+                  f' Max memory allocated: {max_memory_allocated}, Max memory reserved: {max_memory_reserved}')
+            # wandb.log(
+            #     {f'Best Validation in seed {seed}': best_val_perf,
+            #      f'Best Test in seed {seed}': test_perf}
+            # )
+            print("=" * 50)
+
+            all_validation_acc.append(torch.tensor(validation_perf))
+            all_test_acc.append(torch.tensor(tests_perf))
+        final_vals = torch.stack(all_validation_acc)
+        final_tests = torch.stack(all_test_acc)
+        val_mean = final_vals.mean(dim=0)
+        best_epoch = val_mean.argmax().item()
+        best_epoch_mean_val = final_vals[:, best_epoch].mean()
+        best_epoch_std_val = final_vals[:, best_epoch].std()
+        best_epoch_mean_test = final_tests[:, best_epoch].mean()
+        best_epoch_std_test = final_tests[:, best_epoch].std()
+
+        print(f'Epoch {best_epoch + 1} got maximum average validation accuracy')
+        print(f'Validation accuracy for all the seeds: {best_epoch_mean_val} | Std validation for all the seeds: '
+              f'{best_epoch_std_val} | Test accuracy for all the seeds: {best_epoch_mean_test} | Std test for all the'
+              f' seeds: {best_epoch_std_test}')
+
         wandb.log(
-            {'Validation': best_val_perf,
-             'Test': test_perf}
-        )  # TODO tune based on seed 0, then add seed 0 to 9 with optimal hyperparameters then get average.
-    # final_vals = torch.tensor(Average_validation_acc)
-    # final_tests = torch.tensor(Average_test_acc)
-    # print(torch.mean(Average_validation_acc))
-    # print(torch.std(Average_validation_acc))
-    # print(torch.mean(Average_test_acc))
-    # print(torch.std(Average_test_acc))
+            {'Best Validation in all seeds': best_epoch_mean_val,
+             'Std validation': best_epoch_std_val,
+             'Best Test in all seeds': best_epoch_mean_test,
+             'Std test': best_epoch_std_test}
+        )
+
 
 if __name__ == "__main__":
     wandb.agent(sweep_id, main)

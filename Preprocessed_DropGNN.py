@@ -29,17 +29,17 @@ sweep_config = {
     "metric": {"name": "test_acc", "goal": "maximize"},
     "parameters": {
         "lr": {"values": [0.01]},
-        "num_layers": {"values": [2, 3, 4]},
-        "batch_norm": {"values": [True]},
-        "batch_size": {"values": [32, 64]},
-        "dropout": {"values": [0.0, 0.5]},
-        "normalization": {"values": ["After"]},
-        "k": {"values": [2]},
-        "sum_or_cat": {"values": ["cat"]},
-        "hidden_dim": {"values": [16, 32, 64]}
+        # "num_layers": {"values": [4]},
+        # "batch_norm": {"values": [True]},
+        "batch_size": {"values": [64]},
+        "dropout": {"values": [0.5]},
+        # "normalization": {"values": ["After"]},
+        # "k": {"values": [2]},
+        # "sum_or_cat": {"values": ["cat"]},
+        "hidden_dim": {"values": [32]}
     }
 }
-sweep_id = wandb.sweep(sweep_config, project="SDGNN_moltox")
+sweep_id = wandb.sweep(sweep_config, project="DropGCN_moltox_final")
 
 
 class FeatureDegree(BaseTransform):
