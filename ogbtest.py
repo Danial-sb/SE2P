@@ -480,10 +480,10 @@ def main(config=None):
     parser.add_argument('--dataset', type=str, choices=['ogbg-molhiv', 'ogbg-molpcba', "ogbg-moltox21"], default='ogbg-moltox21')
     parser.add_argument('--epochs', type=int, default=350, help='maximum number of epochs')
     parser.add_argument('--model', type=str, choices=['SDGNN_ogb', 'GIN_ogb', 'GCN_ogb', 'DropGIN_ogb',
-                                                      'DropGCN_ogb', 'SDGNN_deepset_ogb'], default='DropGCN_ogb')
+                                                      'DropGCN_ogb', 'SDGNN_deepset_ogb'], default='SDGNN_deepset_ogb')
     # parser.add_argument('--dropout', type=float, choices=[0.5, 0.0], default=0.5, help='dropout probability')
     parser.add_argument('--seed', type=int, default=0, help='seed for reproducibility')
-    parser.add_argument('--agg', type=str, default="mean", choices=["mean", "concat", "deepset"],
+    parser.add_argument('--agg', type=str, default="deepset", choices=["mean", "concat", "deepset"],
                         help='Method for aggregating the perturbation')
     args = parser.parse_args()
 
