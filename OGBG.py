@@ -1,4 +1,4 @@
-from Preprocessed_DropGNN import *
+from SDGNN import *
 from ogb.graphproppred import PygGraphPropPredDataset
 from torch_geometric.loader import DataLoader
 import torch.nn as nn
@@ -478,12 +478,12 @@ def test_ogb(loader, model, evaluator, device):
 def main(config=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, choices=['ogbg-molhiv', 'ogbg-molpcba', "ogbg-moltox21"], default='ogbg-moltox21')
-    parser.add_argument('--epochs', type=int, default=350, help='maximum number of epochs')
+    parser.add_argument('--epochs', type=int, default=100, help='maximum number of epochs')
     parser.add_argument('--model', type=str, choices=['SDGNN_ogb', 'GIN_ogb', 'GCN_ogb', 'DropGIN_ogb',
-                                                      'DropGCN_ogb', 'SDGNN_deepset_ogb'], default='SDGNN_deepset_ogb')
+                                                      'DropGCN_ogb', 'SDGNN_deepset_ogb'], default='DropGCN_ogb')
     # parser.add_argument('--dropout', type=float, choices=[0.5, 0.0], default=0.5, help='dropout probability')
     parser.add_argument('--seed', type=int, default=0, help='seed for reproducibility')
-    parser.add_argument('--agg', type=str, default="deepset", choices=["mean", "concat", "deepset"],
+    parser.add_argument('--agg', type=str, default="mean", choices=["mean", "concat", "deepset"],
                         help='Method for aggregating the perturbation')
     args = parser.parse_args()
 
@@ -534,7 +534,7 @@ def main(config=None):
                 enriched_dataset = EnrichedGraphDataset(os.path.join(current_path, 'enriched_dataset'), name, dataset, p=p,
                                                         num_perturbations=num_perturbations, max_nodes=max_nodes,
                                                         config=config,
-                                                        args=args)  # everything based on seed or no? yes I think
+                                                        args=args)
                 end_time = time.time()
                 elapsed_time = end_time - start_time
                 print(f"Done! Time taken: {elapsed_time:.2f} seconds")

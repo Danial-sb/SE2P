@@ -29,17 +29,17 @@ sweep_config = {
     "metric": {"name": "test_acc", "goal": "maximize"},
     "parameters": {
         "lr": {"values": [0.01]},
-        "num_layers": {"values": [3]},
+        "num_layers": {"values": [4]},
         "batch_norm": {"values": [True]},
-        "batch_size": {"values": [32]},
-        "dropout": {"values": [0.0]},
+        "batch_size": {"values": [64]},
+        "dropout": {"values": [0.5]},
         "normalization": {"values": ["After"]},
         "k": {"values": [3]},
         "sum_or_cat": {"values": ["cat"]},
-        "hidden_dim": {"values": [64]}
+        "hidden_dim": {"values": [32]}
     }
 }
-sweep_id = wandb.sweep(sweep_config, project="SDGNNds_moltox_final")
+sweep_id = wandb.sweep(sweep_config, project="test_ds")
 
 
 class FeatureDegree(BaseTransform):
@@ -336,15 +336,15 @@ class EnrichedGraphDataset(InMemoryDataset):
             elif args.agg == "deepset" and config.normalization == "After":
                 adj = get_adj(edge_index, set_diag=False,
                               symmetric_normalize=False)  # set diag here can be false or true
-                if num_nodes < self.max_nodes:
-                    pad_size = self.max_nodes - num_nodes
-                    feature_matrix = torch.cat([feature_matrix, torch.zeros(pad_size, feature_matrix.size(1))], dim=0)
-
-                if adj.size(0) < self.max_nodes:
-                    pad_size = self.max_nodes - adj.size(0)
-                    zeros_pad = torch.zeros(pad_size, adj.size(1))
-                    adj = torch.cat([adj, zeros_pad], dim=0)
-                    adj = torch.cat([adj, torch.zeros(adj.size(0), pad_size)], dim=1)
+                # if num_nodes < self.max_nodes:
+                #     pad_size = self.max_nodes - num_nodes
+                #     feature_matrix = torch.cat([feature_matrix, torch.zeros(pad_size, feature_matrix.size(1))], dim=0)
+                #
+                # if adj.size(0) < self.max_nodes:
+                #     pad_size = self.max_nodes - adj.size(0)
+                #     zeros_pad = torch.zeros(pad_size, adj.size(1))
+                #     adj = torch.cat([adj, zeros_pad], dim=0)
+                #     adj = torch.cat([adj, torch.zeros(adj.size(0), pad_size)], dim=1)
 
                 # feature_matrix, adj = self.pad_data(feature_matrix, adj)
                 adj = adj.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
@@ -518,7 +518,7 @@ class EnrichedGraphDataset(InMemoryDataset):
 #         return F.log_softmax(x, dim=-1)
 
 class DeepSet(nn.Module):
-    def __init__(self, input_size, hidden_size, num_perturbations, max_nodes):
+    def __init__(self, input_size, hidden_size, num_perturbations, device):
         super(DeepSet, self).__init__()
 
         self.hidden_size = hidden_size
@@ -541,7 +541,8 @@ class DeepSet(nn.Module):
         )
 
         self.num_perturbations = num_perturbations
-        self.max_nodes = max_nodes
+        self.device = device
+        # self.max_nodes = max_nodes
 
         # self.reset_parameters()
 
@@ -553,31 +554,43 @@ class DeepSet(nn.Module):
     #         if isinstance(module, nn.BatchNorm1d):
     #             module.reset_parameters()
 
-    def forward(self, input_data):
+    def forward(self, data):
         # batch_size = input_data.size(0)
 
-        x = self.mlp_perturbation(input_data)
+        x = self.mlp_perturbation(data.x)
+        ptr = data.ptr
+        nodes = (torch.diff(ptr) / self.num_perturbations).to(torch.int64).to(self.device)
+        idx_list = []
+        start = 0
+        for node in nodes:
+            idx = torch.arange(start, start + node).repeat(self.num_perturbations)
+            idx_list.append(idx)
+            start += node
+        idx_cat = torch.cat(idx_list, dim=0).to(self.device)
+        aggregated_output = scatter(x, idx_cat, dim=-2, reduce='sum')
+
         # x_transformed = x.view(self.num_perturbations, input_data.size(0) // self.num_perturbations,
         # self.hidden_size)  for batch=1
 
         # x_transformed = x.view(batch_size // self.num_perturbations, self.num_perturbations, self.hidden_size)
-        x_transformed = x.view(-1, self.num_perturbations, self.max_nodes, self.hidden_size)
-        aggregated_output = torch.sum(x_transformed, dim=1)
-        aggregated_output = aggregated_output.view(-1, self.hidden_size)
+        # x_transformed = x.view(-1, self.num_perturbations, self.max_nodes, self.hidden_size)
+        # aggregated_output = torch.sum(x_transformed, dim=1)
+        # aggregated_output = aggregated_output.view(-1, self.hidden_size)
         # aggregated_output = torch.sum(x_transformed, dim=0) va in bara batch=1 bod
 
         final_output = self.mlp_aggregation(aggregated_output)
 
-        return final_output
+        return nodes, final_output
 
 
 class SDGNN_Deepset(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim, dropout, num_perturbations, max_nodes):
+    def __init__(self, input_dim, hidden_dim, output_dim, dropout, num_perturbations, device):
         super(SDGNN_Deepset, self).__init__()
 
         self.num_perturbations = num_perturbations
+        self.device = device
 
-        self.deepset_aggregator = DeepSet(input_dim, hidden_dim, num_perturbations, max_nodes)
+        self.deepset_aggregator = DeepSet(input_dim, hidden_dim, num_perturbations, device)
 
         self.linear1 = nn.Linear(hidden_dim, hidden_dim)
         self.bn1 = nn.BatchNorm1d(hidden_dim)
@@ -599,18 +612,24 @@ class SDGNN_Deepset(nn.Module):
                 m.reset_parameters()
 
     def forward(self, data):
-        x = data.x
-        batch = data.batch
+        # x = data.x
+        # batch = data.batch
 
-        aggregated_features = self.deepset_aggregator(x)
-        batch = batch.view(-1, self.num_perturbations).to(torch.float).mean(dim=1).long()
+        nodes, aggregated_features = self.deepset_aggregator(data)
+        batch_indexing = torch.zeros(aggregated_features.size(0), dtype=torch.long, device=self.device)
+        start_idx = 0
+
+        for idx, boundary in enumerate(nodes):
+            batch_indexing[start_idx:start_idx + boundary] = idx
+            start_idx += boundary
+        # batch = batch.view(-1, self.num_perturbations).to(torch.float).mean(dim=1).long()
 
         x = self.elu(self.bn1(self.linear1(aggregated_features)))
 
         x = self.elu(self.bn2(self.linear2(x)))
         x = F.dropout(x, p=self.dropout, training=self.training)
 
-        x = global_add_pool(x, batch)
+        x = global_add_pool(x, batch_indexing)
 
         x = self.elu(self.bn3(self.linear3(x)))
         x = F.dropout(x, p=self.dropout, training=self.training)
@@ -800,7 +819,7 @@ def main(config=None):
 
         if args.agg == "deepset":
             model = SDGNN_Deepset(enriched_dataset.num_features, config.hidden_dim,
-                                  enriched_dataset.num_classes, config.dropout, num_perturbations, max_nodes).to(device)
+                                  enriched_dataset.num_classes, config.dropout, num_perturbations, device).to(device)
         else:
             model = SDGNN(enriched_dataset.num_features, config.hidden_dim, enriched_dataset.num_classes,
                           config.dropout, config.num_layers, config.batch_norm).to(device)

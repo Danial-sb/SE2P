@@ -16,7 +16,7 @@ import logging
 import random
 from test_tube import HyperOptArgumentParser
 from ptc_dataset import PTCDataset
-from Preprocessed_DropGNN import FeatureDegree
+from SDGNN import FeatureDegree
 
 logging.basicConfig(filename='log/DropGCN_IMDBM.log', level=logging.INFO, format='%(asctime)s - %(message)s')
 
