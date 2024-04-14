@@ -131,29 +131,29 @@ def main(args, cluster=None):
             idx_list.append(idx)
         return idx_list
 
-    class CustomGCNConv(nn.Module):
-        def __init__(self, input_dim, output_dim):
-            super(CustomGCNConv, self).__init__()
-            self.linear_1 = nn.Linear(input_dim, output_dim)
-            self.bn = nn.BatchNorm1d(output_dim)
-            self.relu = nn.ReLU()
-            self.linear_2 = nn.Linear(output_dim, output_dim)
-            self.gcnconv = GCNConv(output_dim, output_dim)  # Using GCNConv with specified dimensions
-
-        def forward(self, x, edge_index):
-            x = self.linear_1(x)
-            x = self.bn(x)
-            x = self.relu(x)
-            x = self.linear_2(x)
-            x = self.gcnconv(x, edge_index)
-            return x
+    # class CustomGCNConv(nn.Module):
+    #     def __init__(self, input_dim, output_dim):
+    #         super(CustomGCNConv, self).__init__()
+    #         self.linear_1 = nn.Linear(input_dim, output_dim)
+    #         self.bn = nn.BatchNorm1d(output_dim)
+    #         self.relu = nn.ReLU()
+    #         self.linear_2 = nn.Linear(output_dim, output_dim)
+    #         self.gcnconv = GCNConv(output_dim, output_dim)  # Using GCNConv with specified dimensions
+    #
+    #     def forward(self, x, edge_index):
+    #         x = self.linear_1(x)
+    #         x = self.bn(x)
+    #         x = self.relu(x)
+    #         x = self.linear_2(x)
+    #         x = self.gcnconv(x, edge_index)
+    #         return x
 
     class GCN(nn.Module):
         def __init__(self):
             super(GCN, self).__init__()
 
             num_features = dataset.num_features
-            dim = args.hidden_units
+            hidden_dim = args.hidden_units
             self.dropout = args.dropout
 
             self.num_layers = 4
@@ -162,20 +162,23 @@ def main(args, cluster=None):
             self.bns = nn.ModuleList()
             self.fcs = nn.ModuleList()
 
-            self.convs.append(CustomGCNConv(num_features, dim))
-            self.bns.append(nn.BatchNorm1d(dim))
+            self.convs.append(GCNConv(num_features, hidden_dim))
+            self.bns.append(nn.BatchNorm1d(hidden_dim))
             self.fcs.append(nn.Linear(num_features, dataset.num_classes))
-            self.fcs.append(nn.Linear(dim, dataset.num_classes))
+            self.fcs.append(nn.Linear(hidden_dim, dataset.num_classes))
 
             for i in range(self.num_layers - 1):
-                self.convs.append(CustomGCNConv(dim, dim))
-                self.bns.append(nn.BatchNorm1d(dim))
-                self.fcs.append(nn.Linear(dim, dataset.num_classes))
+                self.convs.append(GCNConv(hidden_dim, hidden_dim))
+                self.bns.append(nn.BatchNorm1d(hidden_dim))
+                self.fcs.append(nn.Linear(hidden_dim, dataset.num_classes))
+
             self.reset_parameters()
 
         def reset_parameters(self):
             for m in self.modules():
-                if isinstance(m, nn.Linear) or isinstance(m, GCNConv):
+                if isinstance(m, nn.Linear):
+                    m.reset_parameters()
+                elif isinstance(m, GCNConv):
                     m.reset_parameters()
                 elif isinstance(m, nn.BatchNorm1d):
                     m.reset_parameters()
@@ -201,6 +204,59 @@ def main(args, cluster=None):
                     out += x
             return F.log_softmax(out, dim=-1)
 
+    # class GCN(nn.Module):
+    #     def __init__(self):
+    #         super(GCN, self).__init__()
+    #
+    #         num_features = dataset.num_features
+    #         dim = args.hidden_units
+    #         self.dropout = args.dropout
+    #
+    #         self.num_layers = 4
+    #
+    #         self.convs = nn.ModuleList()
+    #         self.bns = nn.ModuleList()
+    #         self.fcs = nn.ModuleList()
+    #
+    #         self.convs.append(CustomGCNConv(num_features, dim))
+    #         self.bns.append(nn.BatchNorm1d(dim))
+    #         self.fcs.append(nn.Linear(num_features, dataset.num_classes))
+    #         self.fcs.append(nn.Linear(dim, dataset.num_classes))
+    #
+    #         for i in range(self.num_layers - 1):
+    #             self.convs.append(CustomGCNConv(dim, dim))
+    #             self.bns.append(nn.BatchNorm1d(dim))
+    #             self.fcs.append(nn.Linear(dim, dataset.num_classes))
+    #         self.reset_parameters()
+    #
+    #     def reset_parameters(self):
+    #         for m in self.modules():
+    #             if isinstance(m, nn.Linear) or isinstance(m, GCNConv):
+    #                 m.reset_parameters()
+    #             elif isinstance(m, nn.BatchNorm1d):
+    #                 m.reset_parameters()
+    #
+    #     def forward(self, data):
+    #         x = data.x
+    #         edge_index = data.edge_index
+    #         batch = data.batch
+    #         outs = [x]
+    #         for i in range(self.num_layers):
+    #             x = self.convs[i](x, edge_index)
+    #             x = self.bns[i](x)
+    #             x = F.relu(x)
+    #             outs.append(x)
+    #
+    #         out = None
+    #         for i, x in enumerate(outs):
+    #             x = global_add_pool(x, batch)
+    #             x = F.dropout(self.fcs[i](x), p=self.dropout, training=self.training)
+    #             if out is None:
+    #                 out = x
+    #             else:
+    #                 out += x
+    #         return F.log_softmax(out, dim=-1)
+
     class DropGCN(nn.Module):
         def __init__(self):
             super(DropGCN, self).__init__()
@@ -215,13 +271,13 @@ def main(args, cluster=None):
             self.bns = nn.ModuleList()
             self.fcs = nn.ModuleList()
 
-            self.convs.append(CustomGCNConv(num_features, dim))
+            self.convs.append(GCNConv(num_features, dim))
             self.bns.append(nn.BatchNorm1d(dim))
             self.fcs.append(nn.Linear(num_features, dataset.num_classes))
             self.fcs.append(nn.Linear(dim, dataset.num_classes))
 
             for i in range(self.num_layers - 1):
-                self.convs.append(CustomGCNConv(dim, dim))
+                self.convs.append(GCNConv(dim, dim))
                 self.bns.append(nn.BatchNorm1d(dim))
                 self.fcs.append(nn.Linear(dim, dataset.num_classes))
             self.reset_parameters()
@@ -622,7 +678,7 @@ def main(args, cluster=None):
 if __name__ == '__main__':
     parser = HyperOptArgumentParser(strategy='grid_search')
     parser.add_argument('--dataset', type=str, choices=['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES',
-                                                        'PTC_GIN', 'NCI109', 'COLLAB'], default='IMDB-MULTI',
+                                                        'PTC_GIN', 'NCI109', 'COLLAB'], default='MUTAG',
                         help="Options are ['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES', 'PTC_GIN']")
     parser.opt_list('--dropout', type=float, default=0.0, tunable=True, options=[0.5, 0.0])
     parser.opt_list('--batch_size', type=int, default=128, tunable=True, options=[32, 128])
@@ -635,7 +691,7 @@ if __name__ == '__main__':
     # parser.add_argument('--hidden_units', type=int, default=64, choices=[32, 64])
     # parser.add_argument('--dropout', type=float, choices=[0.5, 0.2], default=0.5, help='dropout probability')
     parser.add_argument('--epochs', type=int, default=350, help='maximum number of epochs')
-    parser.add_argument('--grid_search', action='store_true', default=True)
+    parser.add_argument('--grid_search', action='store_true', default=False, help='whether to do grid search')
     # parser.add_argument('--min_delta', type=float, default=0.001, help='min_delta in early stopping')
     # parser.add_argument('--patience', type=int, default=100, help='patience in early stopping')
 
