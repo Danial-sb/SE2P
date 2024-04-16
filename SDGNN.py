@@ -36,6 +36,7 @@ sweep_config = {
         "normalization": {"values": ["After"]},
         "k": {"values": [3]},
         "sum_or_cat": {"values": ["cat"]},
+        "decoder_layers": {"values": [2]},
         "hidden_dim": {"values": [32]}
     }
 }
@@ -269,12 +270,11 @@ def diffusion_sgcn(adj_perturbed, feature_matrix, config, seed):
 
 
 class EnrichedGraphDataset(InMemoryDataset):
-    def __init__(self, root, name, dataset, p, num_perturbations, max_nodes, config, args):
+    def __init__(self, root, name, dataset, p, num_perturbations, config, args):
         super(EnrichedGraphDataset, self).__init__(root, transform=None, pre_transform=None)
         self.name = name
         self.p = p
         self.num_perturbations = num_perturbations
-        self.max_nodes = max_nodes
 
         if self._processed_file_exists():
             print("Dataset was already in memory.")
@@ -678,7 +678,7 @@ class SDGNN_DeepSet(nn.Module):
         for _ in range(num_layers):
             layers.append(nn.Linear(input_size, hidden_size))
             layers.append(nn.BatchNorm1d(hidden_size))
-            layers.append(nn.ELU())
+            layers.append(nn.ELU()) #Todo check ReLU
             input_size = hidden_size
         return nn.Sequential(*layers)
 
@@ -816,12 +816,14 @@ def main(config=None):
                              "'NCI1', 'NCI109']")
     # parser.add_argument('--batch_size', type=int, default=32, help='batch size')
     parser.add_argument('--seed', type=int, default=0, help='seed for reproducibility')
+    parser.add_argument('--ds_local_layers', type=int, default=2, help='number of local layers in deepset')
+    parser.add_argument('--ds_global_layers', type=int, default=2, help='number of global layers in deepset')
     # parser.add_argument('--lr', type=float, default=0.01, help='learning rate')
     # parser.add_argument('--dropout', type=float, choices=[0.5, 0.2], default=0.2, help='dropout probability')
     parser.add_argument('--epochs', type=int, default=350, help='maximum number of epochs')
     # parser.add_argument('--min_delta', type=float, default=0.001, help='min_delta in early stopping')
     # parser.add_argument('--patience', type=int, default=100, help='patience in early stopping')
-    parser.add_argument('--agg', type=str, default="mean", choices=["mean", "concat", "deepset", "sign", "sgcn"],
+    parser.add_argument('--agg', type=str, default="deepset", choices=["mean", "concat", "deepset", "sign", "sgcn"],
                         help='Method for aggregating the perturbation')
     # parser.add_argument('--normalization', type=str, default='After', choices=['After', 'Before'],
     #                    help='Doing normalization before generation of perturbations or after')
@@ -869,8 +871,7 @@ def main(config=None):
         start_time = time.time()
         # print("Preprocessing ...")
         enriched_dataset = EnrichedGraphDataset(os.path.join(current_path, 'enriched_dataset'), name, dataset, p=p,
-                                                num_perturbations=num_perturbations, max_nodes=max_nodes, config=config,
-                                                args=args)
+                                                num_perturbations=num_perturbations, config=config, args=args)
 
         end_time = time.time()
         elapsed_time = end_time - start_time
@@ -901,10 +902,11 @@ def main(config=None):
 
         if args.agg == "deepset":
             model = SDGNN_DeepSet(enriched_dataset.num_features, config.hidden_dim,
-                                  enriched_dataset.num_classes, num_perturbations, config.dropout, 2, 2, 2, device).to(device)
+                                  enriched_dataset.num_classes, num_perturbations, config.dropout, args.ds_local_layers,
+                                  args.ds_global_layers, config.decoder_layers, device).to(device)
         else:
             model = SDGNN(enriched_dataset.num_features, config.hidden_dim, enriched_dataset.num_classes,
-                          config.dropout, config.num_layers, 2, config.batch_norm).to(device)
+                          config.dropout, config.num_layers, config.decoder_layers, config.batch_norm).to(device)
 
         # Iterate through each fold
         for fold, (train_indices, test_indices) in enumerate(skf_splits):
