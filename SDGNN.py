@@ -29,18 +29,19 @@ sweep_config = {
     "metric": {"name": "test_acc", "goal": "maximize"},
     "parameters": {
         "lr": {"values": [0.01]},
-        "num_layers": {"values": [4]},
-        "batch_norm": {"values": [True]},
-        "batch_size": {"values": [64]},
-        "dropout": {"values": [0.5]},
+        # "num_layers": {"values": [4]},
+        "batch_norm": {"values": [True, False]},
+        "batch_size": {"values": [32, 64]},
+        "dropout": {"values": [0.2, 0.5]},
         "normalization": {"values": ["After"]},
         "k": {"values": [3]},
         "sum_or_cat": {"values": ["cat"]},
-        "decoder_layers": {"values": [2]},
-        "hidden_dim": {"values": [32]}
+        "decoder_layers": {"values": [2, 3]},
+        "activation": {"values": ["ELU", "ReLU"]},
+        "hidden_dim": {"values": [16, 32]}
     }
 }
-sweep_id = wandb.sweep(sweep_config, project="test_ds")
+sweep_id = wandb.sweep(sweep_config, project="Deepset_new_MUTAG")
 
 
 class FeatureDegree(BaseTransform):
@@ -635,7 +636,7 @@ class EnrichedGraphDataset(InMemoryDataset):
 
 
 class Decoder(nn.Module):
-    def __init__(self, input_size, output_size, num_layers, dropout_rate, hidden_factor=2, batch_norm=False, dropout=True):
+    def __init__(self, input_size, output_size, num_layers, dropout_rate, config, hidden_factor=2, batch_norm=False, dropout=True):
         super(Decoder, self).__init__()
 
         hidden_sizes = [input_size // (hidden_factor ** i) for i in range(num_layers)]
@@ -644,7 +645,10 @@ class Decoder(nn.Module):
             layers.append(nn.Linear(hidden_sizes[i], hidden_sizes[i + 1]))
             if batch_norm:
                 layers.append(nn.BatchNorm1d(hidden_sizes[i + 1]))
-            layers.append(nn.ELU())
+            if config.activation == 'ELU':
+                layers.append(nn.ELU())
+            else:
+                layers.append(nn.ReLU())
             if dropout:
                 layers.append(nn.Dropout(dropout_rate))
         layers.append(nn.Linear(hidden_sizes[-1], output_size))
@@ -656,17 +660,18 @@ class Decoder(nn.Module):
 
 class SDGNN_DeepSet(nn.Module):
     def __init__(self, input_size, hidden_size, output_size, num_perturbations, dropout, mlp_local_layers,
-                 mlp_global_layers, decoder_layers, device):
+                 mlp_global_layers, decoder_layers, device, config):
         super(SDGNN_DeepSet, self).__init__()
 
         self.hidden_size = hidden_size
+        self.config = config
         # MLP for individual perturbations
-        self.mlp_local = self.create_mlp(input_size, hidden_size, mlp_local_layers)
+        self.mlp_local = self.create_mlp(input_size, hidden_size, mlp_local_layers) #TODO maybe include nn MLP
 
         # MLP for aggregation
         self.mlp_global = self.create_mlp(hidden_size, hidden_size, mlp_global_layers)
 
-        self.decoder = Decoder(hidden_size, output_size, decoder_layers, dropout)
+        self.decoder = Decoder(hidden_size, output_size, decoder_layers, dropout, config)
 
         self.num_perturbations = num_perturbations
         self.device = device
@@ -677,8 +682,12 @@ class SDGNN_DeepSet(nn.Module):
         layers = []
         for _ in range(num_layers):
             layers.append(nn.Linear(input_size, hidden_size))
-            layers.append(nn.BatchNorm1d(hidden_size))
-            layers.append(nn.ELU()) #Todo check ReLU
+            if self.config.batch_norm:
+                layers.append(nn.BatchNorm1d(hidden_size))
+            if self.config.activation == 'ELU':
+                layers.append(nn.ELU())
+            else:
+                layers.append(nn.ReLU())
             input_size = hidden_size
         return nn.Sequential(*layers)
 
@@ -877,8 +886,8 @@ def main(config=None):
         elapsed_time = end_time - start_time
         print(f"Done! Time taken: {elapsed_time:.2f} seconds")
 
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        # device = torch.device('cpu')
+        # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        device = torch.device('cpu')
         print(f'Device: {device}')
         # seeds_to_test = [args.seed]
         n_splits = 10
@@ -903,7 +912,7 @@ def main(config=None):
         if args.agg == "deepset":
             model = SDGNN_DeepSet(enriched_dataset.num_features, config.hidden_dim,
                                   enriched_dataset.num_classes, num_perturbations, config.dropout, args.ds_local_layers,
-                                  args.ds_global_layers, config.decoder_layers, device).to(device)
+                                  args.ds_global_layers, config.decoder_layers, device, config).to(device)
         else:
             model = SDGNN(enriched_dataset.num_features, config.hidden_dim, enriched_dataset.num_classes,
                           config.dropout, config.num_layers, config.decoder_layers, config.batch_norm).to(device)
