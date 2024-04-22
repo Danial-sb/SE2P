@@ -41,11 +41,11 @@ sweep_config = {
         "sum_or_cat": {"values": ["cat"]},
         "decoder_layers": {"values": [2, 3]},
         "activation": {"values": ["ReLU"]},
-        "hidden_dim": {"values": [16, 32]},
+        "hidden_dim": {"values": [32, 64]},
         "graph_pooling": {"values": ["sum"]}
     }
 }
-sweep_id = wandb.sweep(sweep_config, project="Deepset_new_Proteins")
+sweep_id = wandb.sweep(sweep_config, project="test")
 
 
 class FeatureDegree(BaseTransform):
@@ -225,8 +225,8 @@ def compute_symmetric_normalized_perturbed_adj(adj_perturbed):  # This is for do
     return all_normalized_adj
 
 
-def diffusion(adj_perturbed, feature_matrix, config, seed):
-    torch.manual_seed(seed)
+def diffusion(adj_perturbed, feature_matrix, config, args):
+    torch.manual_seed(args.seed)
     enriched_feature_matrices = []
     for perturbation in range(adj_perturbed.size(0)):
         # Get the adjacency matrix for this perturbation
@@ -244,7 +244,7 @@ def diffusion(adj_perturbed, feature_matrix, config, seed):
             internal_diffusion = torch.stack(internal_diffusion, dim=0)
             internal_diffusion = torch.sum(internal_diffusion, dim=0)
         elif config.sum_or_cat == "cat":
-            internal_diffusion = torch.cat(internal_diffusion, dim=1)
+            internal_diffusion = torch.cat(internal_diffusion, dim=0 if args.agg == "c4" else 1)
         else:
             raise ValueError("AGG in EQ1 should be either cat or sum")
 
@@ -318,7 +318,7 @@ class EnrichedGraphDataset(InMemoryDataset):
             feature_matrix = data.x.clone().float()  # Converted to float for ogb
             num_nodes = feature_matrix.size(0)
 
-            if args.agg not in ["c1", "deepset", "mean", "concat", "sign", "sgcn"]:
+            if args.agg not in ["c1", "c4", "deepset", "mean", "concat", "sign", "sgcn"]:
                 raise ValueError("Invalid aggregation method specified")
 
             if config.normalization not in ["Before", "After"]:
@@ -334,11 +334,11 @@ class EnrichedGraphDataset(InMemoryDataset):
                 #     adj = pad(adj, (0, pad_amount, 0, pad_amount), mode='constant', value=0)
                 adj = adj.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()  # TODO move this to the  function
                 perturbed_adj = generate_perturbation(adj, self.p, args.seed)
-                feature_matrices_of_perts = diffusion(perturbed_adj, feature_matrix, config, args.seed)
+                feature_matrices_of_perts = diffusion(perturbed_adj, feature_matrix, config, args)
                 final_feature_of_graph = feature_matrices_of_perts.view(-1, feature_matrices_of_perts.size(
                     -1))  # remove view if wanted to use previous
 
-            elif args.agg == "deepset" and config.normalization == "After":
+            elif args.agg == "deepset" or args.agg == "c4" and config.normalization == "After":
                 adj = get_adj(edge_index, set_diag=False,
                               symmetric_normalize=False)  # set diag here can be false or true
                 if adj.size(0) != feature_matrix.size(0):  # This is for ogb
@@ -362,7 +362,7 @@ class EnrichedGraphDataset(InMemoryDataset):
                 normalized_adj = compute_symmetric_normalized_perturbed_adj(perturbed_adj)
                 if torch.isnan(normalized_adj).any():
                     raise ValueError("NaN values encountered in normalized adjacency matrices.")
-                feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config, args.seed)
+                feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config, args)
                 final_feature_of_graph = feature_matrices_of_perts.view(-1, feature_matrices_of_perts.size(-1))
 
             elif args.agg == "mean" and config.normalization == "Before":
@@ -374,7 +374,7 @@ class EnrichedGraphDataset(InMemoryDataset):
                     adj = pad(adj, (0, pad_amount, 0, pad_amount), mode='constant', value=0)
                 adj = adj.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
                 perturbed_adj = generate_perturbation(adj, self.p, args.seed)
-                feature_matrices_of_perts = diffusion(perturbed_adj, feature_matrix, config, args.seed)
+                feature_matrices_of_perts = diffusion(perturbed_adj, feature_matrix, config, args)
                 final_feature_of_graph = feature_matrices_of_perts.mean(dim=0).clone()
 
             elif args.agg == "mean" and config.normalization == "After":
@@ -389,7 +389,7 @@ class EnrichedGraphDataset(InMemoryDataset):
                 normalized_adj = compute_symmetric_normalized_perturbed_adj(perturbed_adj)
                 if torch.isnan(normalized_adj).any():
                     raise ValueError("NaN values encountered in normalized adjacency matrices.")
-                feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config, args.seed)
+                feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config, args)
                 final_feature_of_graph = feature_matrices_of_perts.mean(dim=0).clone()
 
             elif args.agg == "c1" and config.normalization == "After":
@@ -404,14 +404,14 @@ class EnrichedGraphDataset(InMemoryDataset):
                 normalized_adj = compute_symmetric_normalized_perturbed_adj(perturbed_adj)
                 if torch.isnan(normalized_adj).any():
                     raise ValueError("NaN values encountered in normalized adjacency matrices.")
-                feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config, args.seed)
+                feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config, args)
                 final_feature_of_graph = feature_matrices_of_perts.mean(dim=0).clone()
 
             elif args.agg == "concat" and config.normalization == "Before":
                 adj = get_adj(edge_index, set_diag=True, symmetric_normalize=True)
                 adj = adj.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
                 perturbed_adj = generate_perturbation(adj, self.p, args.seed)
-                feature_matrices_of_perts = diffusion(perturbed_adj, feature_matrix, config, args.seed)
+                feature_matrices_of_perts = diffusion(perturbed_adj, feature_matrix, config, args)
                 final_feature_of_graph = feature_matrices_of_perts.view(-1, feature_matrices_of_perts.size(-1)).clone()
 
             elif args.agg == "concat" and config.normalization == "After":
@@ -421,13 +421,13 @@ class EnrichedGraphDataset(InMemoryDataset):
                 normalized_adj = compute_symmetric_normalized_perturbed_adj(perturbed_adj)
                 if torch.isnan(normalized_adj).any():
                     raise ValueError("NaN values encountered in normalized adjacency matrices.")
-                feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config, args.seed)
+                feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config, args)
                 final_feature_of_graph = feature_matrices_of_perts.view(-1, feature_matrices_of_perts.size(-1)).clone()
 
             elif args.agg == "sign":
                 adj = get_adj(edge_index, set_diag=False, symmetric_normalize=True)
                 adj = adj.unsqueeze(0).expand(1, -1, -1).clone()
-                final_feature_of_graph = diffusion(adj, feature_matrix, config, args.seed)
+                final_feature_of_graph = diffusion(adj, feature_matrix, config, args)
                 final_feature_of_graph = final_feature_of_graph.squeeze()
 
             elif args.agg == "sgcn":
@@ -852,6 +852,101 @@ class SDGNN_C3(nn.Module):
         return F.log_softmax(x, dim=-1)
 
 
+class SDGNN_C4(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size, num_perturbations, mlp_local_layers,
+                 mlp_global_layers, device, config):
+        super(SDGNN_C4, self).__init__()
+
+        self.hidden_size = hidden_size
+        self.k = config.k
+        self.num_perturbations = num_perturbations
+        self.device = device
+
+        self.mlp_local_combine = MLP(in_channels=input_size, hidden_channels=hidden_size, out_channels=hidden_size,
+                                     num_layers=mlp_local_layers, plain_last=False)
+
+        self.mlp_global_combine = MLP(in_channels=hidden_size, hidden_channels=hidden_size, out_channels=hidden_size,
+                                      num_layers=mlp_global_layers, plain_last=False)
+
+        self.mlp_local_merge = MLP(in_channels=hidden_size, hidden_channels=hidden_size, out_channels=hidden_size,
+                                   num_layers=mlp_local_layers, plain_last=False)
+
+        self.mlp_global_merge = MLP(in_channels=hidden_size, hidden_channels=hidden_size, out_channels=hidden_size,
+                                    num_layers=mlp_global_layers, plain_last=False)
+
+        if config.graph_pooling == 'sum':
+            self.pool = global_add_pool
+        elif config.graph_pooling == 'attention_agg':
+            self.pool = AttentionalAggregation(
+                gate_nn=torch.nn.Sequential(torch.nn.Linear(hidden_size, 2 * hidden_size),
+                                            torch.nn.BatchNorm1d(2 * hidden_size), torch.nn.ReLU(),
+                                            torch.nn.Linear(2 * hidden_size, 1)))
+
+        self.decoder = Decoder(hidden_size, output_size, config.decoder_layers, config.dropout, config)
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        reset(self.mlp_local_combine)
+        reset(self.mlp_global_combine)
+        reset(self.mlp_local_merge)
+        reset(self.mlp_global_merge)
+        reset(self.pool)
+        reset(self.decoder)
+
+    def forward(self, data):
+
+        ptr = data.ptr
+        nodes = (torch.diff(ptr) / (self.num_perturbations * (self.k + 1))).to(torch.long).to(self.device)
+
+        start_comb = 0
+        idx_list_all = []
+        for node in nodes:
+            idx_list_comb = []
+            for i in range(self.num_perturbations):
+                idx_comb = torch.arange(start_comb, start_comb + node).repeat(self.k + 1)
+                idx_list_comb.append(idx_comb)
+                start_comb += node
+
+            idx_comb = torch.cat(idx_list_comb, dim=0)
+            idx_list_all.append(idx_comb)
+
+        idx_comb = torch.cat(idx_list_all, dim=0).to(self.device)
+
+        x = self.mlp_local_combine(data.x)
+
+        combine_output = scatter(x, idx_comb, dim=-2, reduce='sum')
+
+        x = self.mlp_global_combine(combine_output)
+
+        idx_list_merge = []
+        start_merge = 0
+        for node in nodes:
+            idx_merge = torch.arange(start_merge, start_merge + node).repeat(self.num_perturbations)
+            idx_list_merge.append(idx_merge)
+            start_merge += node
+        idx_merge = torch.cat(idx_list_merge, dim=0).to(self.device)
+
+        x = self.mlp_local_merge(x)
+
+        aggregated_output = scatter(x, idx_merge, dim=-2, reduce='sum')
+
+        batch_indexing = torch.zeros(aggregated_output.size(0), dtype=torch.long, device=self.device)
+        start_idx = 0
+
+        for idx, boundary in enumerate(nodes):
+            batch_indexing[start_idx:start_idx + boundary] = idx
+            start_idx += boundary
+
+        ds_output = self.mlp_global_merge(aggregated_output)
+
+        x = self.pool(ds_output, batch_indexing)
+
+        x = self.decoder(x)
+
+        return F.log_softmax(x, dim=-1)
+
+
 def train(model, loader, optimizer, device):
     model.train()
     loss_all = 0
@@ -887,7 +982,7 @@ def count_parameters(model):
 def main(config=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, choices=['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES',
-                                                        'PTC_GIN', 'NCI1', 'NCI109', 'COLLAB'], default='PROTEINS',
+                                                        'PTC_GIN', 'NCI1', 'NCI109', 'COLLAB'], default='MUTAG',
                         help="Options are ['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES', 'PTC_GIN', "
                              "'NCI1', 'NCI109']")
     # parser.add_argument('--batch_size', type=int, default=32, help='batch size')
@@ -899,8 +994,8 @@ def main(config=None):
     parser.add_argument('--epochs', type=int, default=350, help='maximum number of epochs')
     # parser.add_argument('--min_delta', type=float, default=0.001, help='min_delta in early stopping')
     # parser.add_argument('--patience', type=int, default=100, help='patience in early stopping')
-    parser.add_argument('--agg', type=str, default="deepset",
-                        choices=["c1", "mean", "concat", "deepset", "sign", "sgcn"],
+    parser.add_argument('--agg', type=str, default="c4",
+                        choices=["c1", "c4", "mean", "concat", "deepset", "sign", "sgcn"],
                         help='Method for aggregating the perturbation')
     # parser.add_argument('--normalization', type=str, default='After', choices=['After', 'Before'],
     #                    help='Doing normalization before generation of perturbations or after')
@@ -946,7 +1041,6 @@ def main(config=None):
         print(args)
         name = f"enriched_{args.dataset}_{args.agg}"
         start_time = time.time()
-        # print("Preprocessing ...")
         enriched_dataset = EnrichedGraphDataset(os.path.join(current_path, 'enriched_dataset'), name, dataset, p=p,
                                                 num_perturbations=num_perturbations, config=config, args=args)
 
@@ -985,6 +1079,10 @@ def main(config=None):
         elif args.agg == "c1":
             model = SDGNN_C1(enriched_dataset.num_features, config.hidden_dim, enriched_dataset.num_classes,
                              config.dropout, config.decoder_layers, config).to(device)
+        elif args.agg == "c4":
+            model = SDGNN_C4(enriched_dataset.num_features, config.hidden_dim, enriched_dataset.num_classes,
+                             num_perturbations, args.ds_local_layers, args.ds_global_layers, device,
+                             config).to(device)
         else:
             model = SDGNN_C2(enriched_dataset.num_features, config.hidden_dim, enriched_dataset.num_classes,
                              config.dropout, config.num_layers, config.decoder_layers, config, config.batch_norm).to(
