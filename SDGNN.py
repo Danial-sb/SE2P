@@ -1,12 +1,10 @@
 import torch
 import os
 from torch_geometric.datasets import TUDataset
-from torch_geometric.data import Data, Dataset
 from torch_geometric.loader import DataLoader
 from torch.utils.data import RandomSampler
 import torch.nn as nn
 import torch.nn.functional as F
-import copy
 import random
 import numpy as np
 from torch_geometric.nn import global_add_pool
@@ -37,15 +35,15 @@ sweep_config = {
         "batch_size": {"values": [32, 64]},
         "dropout": {"values": [0.0, 0.5]},
         "normalization": {"values": ["After"]},
-        "k": {"values": [3]},  # TODO specify for which was 2 and which was 3. pro(3)
+        "k": {"values": [3]},  # TODO specify for which was 2 and which was 3. pro(3) ptc(3)
         "sum_or_cat": {"values": ["cat"]},
         "decoder_layers": {"values": [2, 3]},
         "activation": {"values": ["ReLU"]},
-        "hidden_dim": {"values": [32, 64]},
-        "graph_pooling": {"values": ["sum"]}
+        "hidden_dim": {"values": [16, 32]}
+        # "graph_pooling": {"values": ["sum"]}
     }
 }
-sweep_id = wandb.sweep(sweep_config, project="test")
+sweep_id = wandb.sweep(sweep_config, project="C1-PTC")
 
 
 class FeatureDegree(BaseTransform):
@@ -942,7 +940,7 @@ def count_parameters(model):
 def main(config=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, choices=['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES',
-                                                        'PTC_GIN', 'NCI1', 'NCI109', 'COLLAB'], default='MUTAG',
+                                                        'PTC_GIN', 'NCI1', 'NCI109', 'COLLAB'], default='PTC_GIN',
                         help="Options are ['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES', 'PTC_GIN', "
                              "'NCI1', 'NCI109']")
     # parser.add_argument('--batch_size', type=int, default=32, help='batch size')
@@ -954,7 +952,7 @@ def main(config=None):
     parser.add_argument('--epochs', type=int, default=350, help='maximum number of epochs')
     # parser.add_argument('--min_delta', type=float, default=0.001, help='min_delta in early stopping')
     # parser.add_argument('--patience', type=int, default=100, help='patience in early stopping')
-    parser.add_argument('--agg', type=str, default="c4",
+    parser.add_argument('--agg', type=str, default="c1",
                         choices=["c1", "c4", "mean", "deepset", "sign", "sgcn"],
                         help='Method for aggregating the perturbation')
     # parser.add_argument('--normalization', type=str, default='After', choices=['After', 'Before'],
