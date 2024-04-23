@@ -185,9 +185,10 @@ def get_adj(edge_index, set_diag=True, symmetric_normalize=True):
     return adj
 
 
-def generate_perturbation(adj, p, seed):
+def generate_perturbation(adj, p, num_perturbations, seed):
     torch.manual_seed(seed)
 
+    adj = adj.unsqueeze(0).expand(num_perturbations, -1, -1).clone()
     all_adj = [adj[0].clone()]
     adj_perturbation = adj.clone()  # Make a copy of the original adjacency matrix for this perturbation
 
@@ -318,7 +319,7 @@ class EnrichedGraphDataset(InMemoryDataset):
             feature_matrix = data.x.clone().float()  # Converted to float for ogb
             num_nodes = feature_matrix.size(0)
 
-            if args.agg not in ["c1", "c4", "deepset", "mean", "concat", "sign", "sgcn"]:
+            if args.agg not in ["c1", "c4", "deepset", "mean", "sign", "sgcn"]:
                 raise ValueError("Invalid aggregation method specified")
 
             if config.normalization not in ["Before", "After"]:
@@ -332,8 +333,7 @@ class EnrichedGraphDataset(InMemoryDataset):
                 #     max_size = max(adj.size(0), feature_matrix.size(0))
                 #     pad_amount = max_size - adj.size(0)
                 #     adj = pad(adj, (0, pad_amount, 0, pad_amount), mode='constant', value=0)
-                adj = adj.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()  # TODO move this to the  function
-                perturbed_adj = generate_perturbation(adj, self.p, args.seed)
+                perturbed_adj = generate_perturbation(adj, self.p, self.num_perturbations, args.seed)
                 feature_matrices_of_perts = diffusion(perturbed_adj, feature_matrix, config, args)
                 final_feature_of_graph = feature_matrices_of_perts.view(-1, feature_matrices_of_perts.size(
                     -1))  # remove view if wanted to use previous
@@ -357,8 +357,7 @@ class EnrichedGraphDataset(InMemoryDataset):
                 #     adj = torch.cat([adj, torch.zeros(adj.size(0), pad_size)], dim=1)
 
                 # feature_matrix, adj = self.pad_data(feature_matrix, adj)
-                adj = adj.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
-                perturbed_adj = generate_perturbation(adj, self.p, args.seed)
+                perturbed_adj = generate_perturbation(adj, self.p, self.num_perturbations, args.seed)
                 normalized_adj = compute_symmetric_normalized_perturbed_adj(perturbed_adj)
                 if torch.isnan(normalized_adj).any():
                     raise ValueError("NaN values encountered in normalized adjacency matrices.")
@@ -372,57 +371,23 @@ class EnrichedGraphDataset(InMemoryDataset):
                     max_size = max(adj.size(0), feature_matrix.size(0))
                     pad_amount = max_size - adj.size(0)
                     adj = pad(adj, (0, pad_amount, 0, pad_amount), mode='constant', value=0)
-                adj = adj.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
-                perturbed_adj = generate_perturbation(adj, self.p, args.seed)
+                perturbed_adj = generate_perturbation(adj, self.p, self.num_perturbations, args.seed)
                 feature_matrices_of_perts = diffusion(perturbed_adj, feature_matrix, config, args)
                 final_feature_of_graph = feature_matrices_of_perts.mean(dim=0).clone()
 
-            elif args.agg == "mean" and config.normalization == "After":
+            elif args.agg == "mean" or args.agg == "c1" and config.normalization == "After":
                 adj = get_adj(edge_index, set_diag=False, symmetric_normalize=False)
                 if adj.size(0) != feature_matrix.size(0):
                     counter = counter + 1
                     max_size = max(adj.size(0), feature_matrix.size(0))
                     pad_amount = max_size - adj.size(0)
                     adj = pad(adj, (0, pad_amount, 0, pad_amount), mode='constant', value=0)
-                adj = adj.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
-                perturbed_adj = generate_perturbation(adj, self.p, args.seed)
+                perturbed_adj = generate_perturbation(adj, self.p, self.num_perturbations, args.seed)
                 normalized_adj = compute_symmetric_normalized_perturbed_adj(perturbed_adj)
                 if torch.isnan(normalized_adj).any():
                     raise ValueError("NaN values encountered in normalized adjacency matrices.")
                 feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config, args)
                 final_feature_of_graph = feature_matrices_of_perts.mean(dim=0).clone()
-
-            elif args.agg == "c1" and config.normalization == "After":
-                adj = get_adj(edge_index, set_diag=False, symmetric_normalize=False)
-                if adj.size(0) != feature_matrix.size(0):
-                    counter = counter + 1
-                    max_size = max(adj.size(0), feature_matrix.size(0))
-                    pad_amount = max_size - adj.size(0)
-                    adj = pad(adj, (0, pad_amount, 0, pad_amount), mode='constant', value=0)
-                adj = adj.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
-                perturbed_adj = generate_perturbation(adj, self.p, args.seed)
-                normalized_adj = compute_symmetric_normalized_perturbed_adj(perturbed_adj)
-                if torch.isnan(normalized_adj).any():
-                    raise ValueError("NaN values encountered in normalized adjacency matrices.")
-                feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config, args)
-                final_feature_of_graph = feature_matrices_of_perts.mean(dim=0).clone()
-
-            elif args.agg == "concat" and config.normalization == "Before":
-                adj = get_adj(edge_index, set_diag=True, symmetric_normalize=True)
-                adj = adj.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
-                perturbed_adj = generate_perturbation(adj, self.p, args.seed)
-                feature_matrices_of_perts = diffusion(perturbed_adj, feature_matrix, config, args)
-                final_feature_of_graph = feature_matrices_of_perts.view(-1, feature_matrices_of_perts.size(-1)).clone()
-
-            elif args.agg == "concat" and config.normalization == "After":
-                adj = get_adj(edge_index, set_diag=False, symmetric_normalize=False)
-                adj = adj.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
-                perturbed_adj = generate_perturbation(adj, self.p, args.seed)
-                normalized_adj = compute_symmetric_normalized_perturbed_adj(perturbed_adj)
-                if torch.isnan(normalized_adj).any():
-                    raise ValueError("NaN values encountered in normalized adjacency matrices.")
-                feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config, args)
-                final_feature_of_graph = feature_matrices_of_perts.view(-1, feature_matrices_of_perts.size(-1)).clone()
 
             elif args.agg == "sign":
                 adj = get_adj(edge_index, set_diag=False, symmetric_normalize=True)
@@ -765,11 +730,6 @@ class SDGNN_C2(nn.Module):
 
         x = self.decoder(x)
 
-        # x = self.linear3(x)
-        # x = self.activation(x)
-        # x = F.dropout(x, p=self.dropout, training=self.training)
-        #
-        # x = self.linear4(x)
         return F.log_softmax(x, dim=-1)
 
 
@@ -995,7 +955,7 @@ def main(config=None):
     # parser.add_argument('--min_delta', type=float, default=0.001, help='min_delta in early stopping')
     # parser.add_argument('--patience', type=int, default=100, help='patience in early stopping')
     parser.add_argument('--agg', type=str, default="c4",
-                        choices=["c1", "c4", "mean", "concat", "deepset", "sign", "sgcn"],
+                        choices=["c1", "c4", "mean", "deepset", "sign", "sgcn"],
                         help='Method for aggregating the perturbation')
     # parser.add_argument('--normalization', type=str, default='After', choices=['After', 'Before'],
     #                    help='Doing normalization before generation of perturbations or after')
