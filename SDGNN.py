@@ -31,19 +31,19 @@ sweep_config = {
     "parameters": {
         "lr": {"values": [0.01]},
         # "num_layers": {"values": [4]},
-        "batch_norm": {"values": [True, False]},
+        "batch_norm": {"values": [True]},
         "batch_size": {"values": [32, 64]},
         "dropout": {"values": [0.0, 0.5]},
         "normalization": {"values": ["After"]},
-        "k": {"values": [3]},  # TODO specify for which was 2 and which was 3. pro(3) ptc(3)
+        "k": {"values": [2, 3]},  # TODO specify for which was 2 and which was 3. pro(3) ptc(3)
         "sum_or_cat": {"values": ["cat"]},
         "decoder_layers": {"values": [2, 3]},
         "activation": {"values": ["ReLU"]},
-        "hidden_dim": {"values": [16, 32]}
+        "hidden_dim": {"values": [16, 32, 64]}
         # "graph_pooling": {"values": ["sum"]}
     }
 }
-sweep_id = wandb.sweep(sweep_config, project="C1-PTC")
+sweep_id = wandb.sweep(sweep_config, project="C1-IMDBM")
 
 
 class FeatureDegree(BaseTransform):
@@ -940,7 +940,7 @@ def count_parameters(model):
 def main(config=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, choices=['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES',
-                                                        'PTC_GIN', 'NCI1', 'NCI109', 'COLLAB'], default='PTC_GIN',
+                                                        'PTC_GIN', 'NCI1', 'NCI109', 'COLLAB'], default='IMDB-MULTI',
                         help="Options are ['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES', 'PTC_GIN', "
                              "'NCI1', 'NCI109']")
     # parser.add_argument('--batch_size', type=int, default=32, help='batch size')
@@ -997,7 +997,7 @@ def main(config=None):
     with wandb.init(config=config):
         config = wandb.config
         print(args)
-        name = f"enriched_{args.dataset}_{args.agg}"
+        name = f"enriched_{args.dataset}_{args.agg}_{config.k}"
         start_time = time.time()
         enriched_dataset = EnrichedGraphDataset(os.path.join(current_path, 'enriched_dataset'), name, dataset, p=p,
                                                 num_perturbations=num_perturbations, config=config, args=args)
