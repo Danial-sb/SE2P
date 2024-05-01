@@ -30,20 +30,23 @@ sweep_config = {
     "metric": {"name": "test_acc", "goal": "maximize"},
     "parameters": {
         "lr": {"values": [0.01]},
-        # "num_layers": {"values": [4]},
+        "num_layers": {"values": [1, 2, 3]},
         "batch_norm": {"values": [True]},
         "batch_size": {"values": [32, 64]},
-        "dropout": {"values": [0.0, 0.5]},
+        "dropout": {"values": [0.2, 0.5]},  # if used for c2, use for c3 and others too.
         "normalization": {"values": ["After"]},
-        "k": {"values": [2, 3]},  # TODO specify for which was 2 and which was 3. pro(3) ptc(3)
+        "k": {"values": [3]},
+        # TODO specify for which was 2 and which was 3. pro(3 or 2?) ptc(3) imdbm & b (2) collab (2) mutag (3)
         "sum_or_cat": {"values": ["cat"]},
-        "decoder_layers": {"values": [2, 3]},
-        "activation": {"values": ["ReLU"]},
-        "hidden_dim": {"values": [16, 32, 64]}
-        # "graph_pooling": {"values": ["sum"]}
+        "decoder_layers": {"values": [2]},  # in the previous code 2 layers were used with hidden factor 2
+        "activation": {"values": ["ELU"]},
+        "ds_local_layers": {"values": [1, 2]},
+        "ds_global_layers": {"values": [2]},
+        "hidden_dim": {"values": [16, 32]},
+        "graph_pooling": {"values": ["sum"]},
     }
 }
-sweep_id = wandb.sweep(sweep_config, project="C1-IMDBM")
+sweep_id = wandb.sweep(sweep_config, project="PROTEINS-C2")
 
 
 class FeatureDegree(BaseTransform):
@@ -243,7 +246,7 @@ def diffusion(adj_perturbed, feature_matrix, config, args):
             internal_diffusion = torch.stack(internal_diffusion, dim=0)
             internal_diffusion = torch.sum(internal_diffusion, dim=0)
         elif config.sum_or_cat == "cat":
-            internal_diffusion = torch.cat(internal_diffusion, dim=0 if args.agg == "c4" else 1)
+            internal_diffusion = torch.cat(internal_diffusion, dim=0 if args.configuration == "c4" else 1)
         else:
             raise ValueError("AGG in EQ1 should be either cat or sum")
 
@@ -317,13 +320,13 @@ class EnrichedGraphDataset(InMemoryDataset):
             feature_matrix = data.x.clone().float()  # Converted to float for ogb
             num_nodes = feature_matrix.size(0)
 
-            if args.agg not in ["c1", "c4", "deepset", "mean", "sign", "sgcn"]:
+            if args.configuration not in ["c1", "c2", "c3", "c4", "sign", "sgcn"]:
                 raise ValueError("Invalid aggregation method specified")
 
             if config.normalization not in ["Before", "After"]:
                 raise ValueError("Invalid normalization configuration")
 
-            if args.agg == "deepset" and config.normalization == "Before":
+            if args.configuration == "c3" and config.normalization == "Before":
                 adj = get_adj(edge_index, set_diag=False, symmetric_normalize=True)
                 feature_matrix, adj = self.pad_data(feature_matrix, adj)
                 # if adj.size(0) != feature_matrix.size(0): # for ogb
@@ -336,7 +339,7 @@ class EnrichedGraphDataset(InMemoryDataset):
                 final_feature_of_graph = feature_matrices_of_perts.view(-1, feature_matrices_of_perts.size(
                     -1))  # remove view if wanted to use previous
 
-            elif args.agg == "deepset" or args.agg == "c4" and config.normalization == "After":
+            elif args.configuration == "c3" or args.configuration == "c4" and config.normalization == "After":
                 adj = get_adj(edge_index, set_diag=False,
                               symmetric_normalize=False)  # set diag here can be false or true
                 if adj.size(0) != feature_matrix.size(0):  # This is for ogb
@@ -362,7 +365,7 @@ class EnrichedGraphDataset(InMemoryDataset):
                 feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config, args)
                 final_feature_of_graph = feature_matrices_of_perts.view(-1, feature_matrices_of_perts.size(-1))
 
-            elif args.agg == "mean" and config.normalization == "Before":
+            elif args.configuration == "c2" and config.normalization == "Before":
                 adj = get_adj(edge_index, set_diag=False, symmetric_normalize=True)
                 if adj.size(0) != feature_matrix.size(0):
                     counter = counter + 1
@@ -373,7 +376,7 @@ class EnrichedGraphDataset(InMemoryDataset):
                 feature_matrices_of_perts = diffusion(perturbed_adj, feature_matrix, config, args)
                 final_feature_of_graph = feature_matrices_of_perts.mean(dim=0).clone()
 
-            elif args.agg == "mean" or args.agg == "c1" and config.normalization == "After":
+            elif args.configuration == "c1" or args.configuration == "c2" and config.normalization == "After":
                 adj = get_adj(edge_index, set_diag=False, symmetric_normalize=False)
                 if adj.size(0) != feature_matrix.size(0):
                     counter = counter + 1
@@ -387,13 +390,13 @@ class EnrichedGraphDataset(InMemoryDataset):
                 feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config, args)
                 final_feature_of_graph = feature_matrices_of_perts.mean(dim=0).clone()
 
-            elif args.agg == "sign":
+            elif args.configuration == "sign":
                 adj = get_adj(edge_index, set_diag=False, symmetric_normalize=True)
                 adj = adj.unsqueeze(0).expand(1, -1, -1).clone()
                 final_feature_of_graph = diffusion(adj, feature_matrix, config, args)
                 final_feature_of_graph = final_feature_of_graph.squeeze()
 
-            elif args.agg == "sgcn":
+            elif args.configuration == "sgcn":
                 adj = get_adj(edge_index, set_diag=False, symmetric_normalize=True)
                 adj = adj.unsqueeze(0).expand(1, -1, -1).clone()
                 final_feature_of_graph = diffusion_sgcn(adj, feature_matrix, config, args.seed)
@@ -618,13 +621,13 @@ class EnrichedGraphDataset(InMemoryDataset):
 
 
 class Decoder(nn.Module):  # This is for the decoder of the SDGNN C2, C3 and C4.
-    def __init__(self, input_size, output_size, num_layers, dropout_rate, config, hidden_factor=2, batch_norm=False,
-                 dropout=True):
+    def __init__(self, input_size, output_size, config, hidden_factor=2, batch_norm=False,
+                 dropout=True):  # collab hidden factor=4, IMDB-M and B=3, PTC=2 and mutag=2, PROTEINS=1 for c1
         super(Decoder, self).__init__()
 
-        hidden_sizes = [input_size // (hidden_factor ** i) for i in range(num_layers)]
+        hidden_sizes = [input_size // (hidden_factor ** i) for i in range(config.decoder_layers)]
         layers = []
-        for i in range(num_layers - 1):
+        for i in range(config.decoder_layers - 1):
             layers.append(nn.Linear(hidden_sizes[i], hidden_sizes[i + 1]))
             if batch_norm:
                 layers.append(nn.BatchNorm1d(hidden_sizes[i + 1]))
@@ -633,7 +636,7 @@ class Decoder(nn.Module):  # This is for the decoder of the SDGNN C2, C3 and C4.
             else:
                 layers.append(nn.ReLU())
             if dropout:
-                layers.append(nn.Dropout(dropout_rate))
+                layers.append(nn.Dropout(config.dropout))
         layers.append(nn.Linear(hidden_sizes[-1], output_size))
         self.decoder = nn.Sequential(*layers)
 
@@ -642,17 +645,15 @@ class Decoder(nn.Module):  # This is for the decoder of the SDGNN C2, C3 and C4.
 
 
 class SDGNN_C1(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim, dropout, decoder_layers, config):
+    def __init__(self, input_dim, output_dim, config):
         super(SDGNN_C1, self).__init__()
 
-        # self.decoder = Decoder(input_dim, output_dim, decoder_layers, dropout, config, hidden_factor=1,
-        #                        batch_norm=config.batch_norm)
+        self.decoder = Decoder(input_dim, output_dim, config, hidden_factor=2, batch_norm=config.batch_norm)
 
-        self.decoder = MLP(in_channels=input_dim, hidden_channels=hidden_dim, out_channels=output_dim,
-                           num_layers=decoder_layers, batch_norm="batch_norm" if config.batch_norm else None,
-                           dropout=[dropout] * decoder_layers, activation=config.activation)
+        # self.decoder = MLP(in_channels=input_dim, hidden_channels=hidden_dim, out_channels=output_dim,
+        #                    num_layers=decoder_layers, batch_norm="batch_norm" if config.batch_norm else None,
+        #                    dropout=[dropout] * decoder_layers, activation=config.activation)
 
-        self.dropout = dropout
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -670,21 +671,20 @@ class SDGNN_C1(nn.Module):
 
 
 class SDGNN_C2(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim, dropout, num_layers, decoder_layers, config, batch_norm=True):
+    def __init__(self, input_dim, output_dim, config):
         super(SDGNN_C2, self).__init__()
 
-        self.num_layers = num_layers
-        self.batch_norm = batch_norm
+        self.config = config
 
         self.linears = nn.ModuleList([
-            nn.Linear(input_dim if i == 0 else hidden_dim, hidden_dim)
-            for i in range(num_layers)
+            nn.Linear(input_dim if i == 0 else config.hidden_dim, config.hidden_dim)
+            for i in range(config.num_layers)
         ])
 
-        if self.batch_norm:
+        if config.batch_norm:
             self.bns = nn.ModuleList([
-                nn.BatchNorm1d(hidden_dim)
-                for _ in range(num_layers)
+                nn.BatchNorm1d(config.hidden_dim)
+                for _ in range(config.num_layers)
             ])
 
         if config.activation == 'ELU':
@@ -692,17 +692,15 @@ class SDGNN_C2(nn.Module):
         else:
             self.activation = nn.ReLU()
 
-        self.dropout = dropout
-
-        if self.config.graph_pooling == 'sum':
+        if config.graph_pooling == 'sum':
             self.pool = global_add_pool
         elif self.config.graph_pooling == 'attention_agg':
             self.pool = AttentionalAggregation(
-                gate_nn=torch.nn.Sequential(torch.nn.Linear(hidden_dim, 2 * hidden_dim),
-                                            torch.nn.BatchNorm1d(2 * hidden_dim), torch.nn.ReLU(),
-                                            torch.nn.Linear(2 * hidden_dim, 1)))
+                gate_nn=torch.nn.Sequential(torch.nn.Linear(config.hidden_dim, 2 * config.hidden_dim),
+                                            torch.nn.BatchNorm1d(2 * config.hidden_dim), torch.nn.ReLU(),
+                                            torch.nn.Linear(2 * config.hidden_dim, 1)))
 
-        self.decoder = Decoder(hidden_dim, output_dim, decoder_layers, dropout, config)
+        self.decoder = Decoder(config.hidden_dim, output_dim, config)
 
         self.reset_parameters()
 
@@ -717,12 +715,12 @@ class SDGNN_C2(nn.Module):
         x = data.x
         batch = data.batch
 
-        for i in range(self.num_layers):
+        for i in range(self.config.num_layers):
             x = self.linears[i](x)
-            if self.batch_norm:
+            if self.config.batch_norm:
                 x = self.bns[i](x)
             x = self.activation(x)
-            x = F.dropout(x, p=self.dropout, training=self.training)
+            x = F.dropout(x, p=self.config.dropout, training=self.training)
 
         x = self.pool(x, batch)
 
@@ -732,34 +730,37 @@ class SDGNN_C2(nn.Module):
 
 
 class SDGNN_C3(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, num_perturbations, dropout, mlp_local_layers,
-                 mlp_global_layers, decoder_layers, device, config):
+    def __init__(self, input_size, output_size, num_perturbations, device, config, mlp_before_sum=True):
         super(SDGNN_C3, self).__init__()
 
-        self.hidden_size = hidden_size
         self.config = config
+        self.mlp_before_sum = mlp_before_sum
         # MLP for individual perturbations
-        self.mlp_local = self.create_mlp(input_size, hidden_size, mlp_local_layers)
+        self.mlp_local = self.create_mlp(input_size, config.hidden_dim, config.ds_local_layers)
 
         # MLP for aggregation
-        self.mlp_global = self.create_mlp(hidden_size, hidden_size, mlp_global_layers)
+        self.mlp_global = self.create_mlp(config.hidden_dim, config.hidden_dim, config.ds_global_layers)
+
+        if mlp_before_sum:
+            self.mlp_before_sum = self.create_mlp(config.hidden_dim, config.hidden_dim, config.num_layers,
+                                                  use_dropout=True)
 
         if self.config.graph_pooling == 'sum':
             self.pool = global_add_pool
         elif self.config.graph_pooling == 'attention_agg':
             self.pool = AttentionalAggregation(
-                gate_nn=torch.nn.Sequential(torch.nn.Linear(hidden_size, 2 * hidden_size),
-                                            torch.nn.BatchNorm1d(2 * hidden_size), torch.nn.ReLU(),
-                                            torch.nn.Linear(2 * hidden_size, 1)))
+                gate_nn=torch.nn.Sequential(torch.nn.Linear(config.hidden_dim, 2 * config.hidden_dim),
+                                            torch.nn.BatchNorm1d(2 * config.hidden_dim), torch.nn.ReLU(),
+                                            torch.nn.Linear(2 * config.hidden_dim, 1)))
 
-        self.decoder = Decoder(hidden_size, output_size, decoder_layers, dropout, config)
+        self.decoder = Decoder(config.hidden_dim, output_size, config)
 
         self.num_perturbations = num_perturbations
         self.device = device
 
         self.reset_parameters()
 
-    def create_mlp(self, input_size, hidden_size, num_layers):
+    def create_mlp(self, input_size, hidden_size, num_layers, use_dropout=False):
         layers = []
         for _ in range(num_layers):
             layers.append(nn.Linear(input_size, hidden_size))
@@ -769,6 +770,8 @@ class SDGNN_C3(nn.Module):
                 layers.append(nn.ELU())
             else:
                 layers.append(nn.ReLU())
+            if use_dropout:
+                layers.append(nn.Dropout(self.config.dropout))
             input_size = hidden_size
         return nn.Sequential(*layers)
 
@@ -795,6 +798,8 @@ class SDGNN_C3(nn.Module):
         aggregated_output = scatter(x, idx_cat, dim=-2, reduce='sum')
 
         ds_output = self.mlp_global(aggregated_output)
+        if self.mlp_before_sum:
+            ds_output = self.mlp_before_sum(ds_output)
 
         batch_indexing = torch.zeros(ds_output.size(0), dtype=torch.long, device=self.device)
         start_idx = 0
@@ -940,23 +945,18 @@ def count_parameters(model):
 def main(config=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, choices=['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES',
-                                                        'PTC_GIN', 'NCI1', 'NCI109', 'COLLAB'], default='IMDB-MULTI',
+                                                        'PTC_GIN', 'NCI1', 'NCI109', 'COLLAB'], default='PROTEINS',
                         help="Options are ['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES', 'PTC_GIN', "
                              "'NCI1', 'NCI109']")
-    # parser.add_argument('--batch_size', type=int, default=32, help='batch size')
     parser.add_argument('--seed', type=int, default=0, help='seed for reproducibility')
-    parser.add_argument('--ds_local_layers', type=int, default=2, help='number of local layers in deepset')
-    parser.add_argument('--ds_global_layers', type=int, default=2, help='number of global layers in deepset')
-    # parser.add_argument('--lr', type=float, default=0.01, help='learning rate')
-    # parser.add_argument('--dropout', type=float, choices=[0.5, 0.2], default=0.2, help='dropout probability')
+    # parser.add_argument('--ds_local_layers', type=int, default=2, help='number of local layers in deepset')
+    # parser.add_argument('--ds_global_layers', type=int, default=4, help='number of global layers in deepset')
     parser.add_argument('--epochs', type=int, default=350, help='maximum number of epochs')
     # parser.add_argument('--min_delta', type=float, default=0.001, help='min_delta in early stopping')
     # parser.add_argument('--patience', type=int, default=100, help='patience in early stopping')
-    parser.add_argument('--agg', type=str, default="c1",
-                        choices=["c1", "c4", "mean", "deepset", "sign", "sgcn"],
-                        help='Method for aggregating the perturbation')
-    # parser.add_argument('--normalization', type=str, default='After', choices=['After', 'Before'],
-    #                    help='Doing normalization before generation of perturbations or after')
+    parser.add_argument('--configuration', type=str, default="c2",
+                        choices=["c1", "c2", "c3", "c4", "sign", "sgcn"],
+                        help='which configuration to be used')
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -985,6 +985,7 @@ def main(config=None):
     print(f'Max number of nodes: {max_nodes}')
     print(f'Min number of nodes: {min_nodes}')
     print(f'Number of graphs: {len(dataset)}')
+    # print(f'Number of features: {dataset.num_features}')
     gamma = mean_n
     p = 2 * 1 / (1 + gamma)
     # num_perturbations = round(gamma * np.log10(gamma))
@@ -997,7 +998,7 @@ def main(config=None):
     with wandb.init(config=config):
         config = wandb.config
         print(args)
-        name = f"enriched_{args.dataset}_{args.agg}_{config.k}"
+        name = f"enriched_{args.dataset}_{args.configuration}"
         start_time = time.time()
         enriched_dataset = EnrichedGraphDataset(os.path.join(current_path, 'enriched_dataset'), name, dataset, p=p,
                                                 num_perturbations=num_perturbations, config=config, args=args)
@@ -1005,6 +1006,7 @@ def main(config=None):
         end_time = time.time()
         elapsed_time = end_time - start_time
         print(f"Done! Time taken: {elapsed_time:.2f} seconds")
+        print(f'Number of enriched features: {enriched_dataset.num_features}')
 
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         # device = torch.device('cpu')
@@ -1029,22 +1031,22 @@ def main(config=None):
 
         skf_splits = separate_data(len(enriched_dataset), n_splits, args.seed)
 
-        if args.agg == "deepset":
-            model = SDGNN_C3(enriched_dataset.num_features, config.hidden_dim,
-                             enriched_dataset.num_classes, num_perturbations, config.dropout, args.ds_local_layers,
-                             args.ds_global_layers, config.decoder_layers, device, config).to(
-                device)  # TODO simplify the args
-        elif args.agg == "c1":
-            model = SDGNN_C1(enriched_dataset.num_features, config.hidden_dim, enriched_dataset.num_classes,
-                             config.dropout, config.decoder_layers, config).to(device)
-        elif args.agg == "c4":
+        if args.configuration == "c1":
+            model = SDGNN_C1(enriched_dataset.num_features, enriched_dataset.num_classes, config).to(device)
+
+        elif args.configuration == "c2":
+            model = SDGNN_C2(enriched_dataset.num_features, enriched_dataset.num_classes, config).to(device)
+
+        elif args.configuration == "c3":
+            model = SDGNN_C3(enriched_dataset.num_features, enriched_dataset.num_classes, num_perturbations, device,
+                             config).to(device)
+
+        elif args.configuration == "c4":
             model = SDGNN_C4(enriched_dataset.num_features, config.hidden_dim, enriched_dataset.num_classes,
-                             num_perturbations, args.ds_local_layers, args.ds_global_layers, device,
+                             num_perturbations, config.ds_local_layers, config.ds_global_layers, device,
                              config).to(device)
         else:
-            model = SDGNN_C2(enriched_dataset.num_features, config.hidden_dim, enriched_dataset.num_classes,
-                             config.dropout, config.num_layers, config.decoder_layers, config, config.batch_norm).to(
-                device)
+            raise ValueError("Error in choosing hyper parameters for the model.")
 
         # Iterate through each fold
         for fold, (train_indices, test_indices) in enumerate(skf_splits):
