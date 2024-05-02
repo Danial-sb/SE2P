@@ -1,6 +1,6 @@
 import torch
 import os
-from torch_geometric.datasets import TUDataset
+from args import Args
 from torch_geometric.loader import DataLoader
 from torch.utils.data import RandomSampler
 import torch.nn as nn
@@ -11,19 +11,16 @@ from torch_geometric.nn import global_add_pool
 from torch_geometric.utils import to_dense_adj
 from torch_scatter import scatter
 from torch_geometric.utils import degree
-from torch_geometric.transforms import BaseTransform
 from torch.nn.functional import pad
 from sklearn.model_selection import StratifiedKFold
 from torch_geometric.loader.dataloader import Collater
 import time
 import argparse
-import os.path as osp
 from torch_geometric.data import Data, InMemoryDataset
 import wandb
-from ptc_dataset import PTCDataset
 from torch_geometric.nn.aggr import AttentionalAggregation
-from mlp import MLP
 from torch_geometric.nn.inits import reset
+from datasets import get_dataset
 
 sweep_config = {
     "method": "grid",
@@ -40,125 +37,15 @@ sweep_config = {
         "sum_or_cat": {"values": ["cat"]},
         "decoder_layers": {"values": [2]},  # in the previous code 2 layers were used with hidden factor 2
         "activation": {"values": ["ELU"]},
-        "ds_local_layers": {"values": [1, 2]},
-        "ds_global_layers": {"values": [2]},
+        "ds_local_layers_comb": {"values": [1, 2]},
+        "ds_global_layers_comb": {"values": [2]},
+        "ds_local_layers_merge": {"values": [1, 2]},
+        "ds_global_layers_merge": {"values": [2]},
         "hidden_dim": {"values": [16, 32]},
         "graph_pooling": {"values": ["sum"]},
     }
 }
-sweep_id = wandb.sweep(sweep_config, project="PROTEINS-C2")
-
-
-class FeatureDegree(BaseTransform):
-    r"""Adds the node degree as one hot encodings to the node features.
-
-    Args:
-        max_degree (int): Maximum degree.
-        in_degree (bool, optional): If set to :obj:`True`, will compute the
-            in-degree of nodes instead of the out-degree.
-            (default: :obj:`False`)
-        cat (bool, optional): Concat node degrees to node features instead
-            of replacing them. (default: :obj:`True`)
-    """
-
-    def __init__(self, max_degree, in_degree=False, cat=True):
-        self.in_degree = in_degree
-        self.cat = cat
-        self.max_degree = max_degree
-
-    def __call__(self, data):
-        idx, x = data.edge_index[1 if self.in_degree else 0], data.x
-        deg = degree(idx, data.num_nodes, dtype=torch.long)
-        deg = F.one_hot(deg, num_classes=self.max_degree + 1).to(torch.float)
-
-        if x is not None and self.cat:
-            x = x.view(-1, 1) if x.dim() == 1 else x
-            deg = degree(data.edge_index[0], data.num_nodes, dtype=torch.long).unsqueeze(-1)
-            data.x = torch.cat([x, deg.to(x.dtype)], dim=-1)
-        else:
-            data.x = deg
-
-        return data
-
-    def __repr__(self) -> str:
-        return f'{self.__class__.__name__}({self.in_degree})'
-
-
-def get_dataset(args):
-    if 'IMDB' in args.dataset:  # IMDB-BINARY or IMDB-MULTI
-        class MyFilter(object):
-            def __call__(self, data):
-                return data.num_nodes <= 70
-
-        class MyPreTransform(object):
-            def __call__(self, data):
-                data.x = degree(data.edge_index[0], data.num_nodes, dtype=torch.long)
-                data.x = F.one_hot(data.x, num_classes=69).to(torch.float)
-                return data
-
-        path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', f'{args.dataset}')
-        dataset = TUDataset(
-            path,
-            name=args.dataset,
-            pre_transform=MyPreTransform(),
-            pre_filter=MyFilter())
-
-    elif 'MUTAG' in args.dataset:
-        class MyFilter(object):
-            def __call__(self, data):
-                return True
-
-        path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', 'MUTAG')
-        dataset = TUDataset(path, name='MUTAG', pre_filter=MyFilter())
-
-    elif 'PROTEINS' in args.dataset:
-        class MyFilter(object):
-            def __call__(self, data):
-                return not (data.num_nodes == 7 and data.num_edges == 12) and data.num_nodes < 450
-
-        path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', 'PROTEINS')
-        dataset = TUDataset(path, name='PROTEINS', pre_filter=MyFilter())
-
-    elif 'ENZYMES' in args.dataset:
-        class MyFilter(object):
-            def __call__(self, data):
-                return data.num_nodes < 95
-
-        path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', 'ENZYMES')
-        dataset = TUDataset(path, name='ENZYMES', pre_filter=MyFilter())
-
-    elif 'PTC_GIN' in args.dataset:
-        class MyFilter(object):
-            def __call__(self, data):
-                return True
-
-        path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', 'PTC_GIN')
-        dataset = PTCDataset(path, name='PTC')
-
-    elif 'COLLAB' in args.dataset:
-
-        path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', 'COLLAB')
-        dataset = TUDataset(path, name='COLLAB', transform=FeatureDegree(max_degree=491, cat=False))
-
-    elif 'NCI1' in args.dataset:
-        class MyFilter(object):
-            def __call__(self, data):
-                return True
-
-        path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', 'NCI1')
-        dataset = TUDataset(path, name='NCI1', pre_filter=MyFilter())
-
-    elif 'NCI109' in args.dataset:
-        class MyFilter(object):
-            def __call__(self, data):
-                return True
-
-        path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', 'NCI109')
-        dataset = TUDataset(path, name='NCI109', pre_filter=MyFilter())
-    else:
-        raise ValueError("Invalid dataset name")
-
-    return dataset
+sweep_id = wandb.sweep(sweep_config, project="test")
 
 
 def separate_data(dataset_len, n_splits, seed):
@@ -274,6 +161,22 @@ def diffusion_sgcn(adj_perturbed, feature_matrix, config, seed):
     feature_matrices_of_perturbations = torch.stack(enriched_feature_matrices)
 
     return feature_matrices_of_perturbations
+
+
+def create_mlp(input_size, hidden_size, num_layers, config, use_dropout=False):
+    layers = []
+    for _ in range(num_layers):
+        layers.append(nn.Linear(input_size, hidden_size))
+        if config.batch_norm:
+            layers.append(nn.BatchNorm1d(hidden_size))
+        if config.activation == 'ELU':
+            layers.append(nn.ELU())
+        else:
+            layers.append(nn.ReLU())
+        if use_dropout:
+            layers.append(nn.Dropout(config.dropout))
+        input_size = hidden_size
+    return nn.Sequential(*layers)
 
 
 class EnrichedGraphDataset(InMemoryDataset):
@@ -645,9 +548,10 @@ class Decoder(nn.Module):  # This is for the decoder of the SDGNN C2, C3 and C4.
 
 
 class SDGNN_C1(nn.Module):
-    def __init__(self, input_dim, output_dim, config):
+    def __init__(self, input_dim, output_dim, config, args):
         super(SDGNN_C1, self).__init__()
 
+        self.args = args
         self.decoder = Decoder(input_dim, output_dim, config, hidden_factor=2, batch_norm=config.batch_norm)
 
         # self.decoder = MLP(in_channels=input_dim, hidden_channels=hidden_dim, out_channels=output_dim,
@@ -667,14 +571,18 @@ class SDGNN_C1(nn.Module):
 
         x = self.decoder(x)
 
-        return F.log_softmax(x, dim=-1)
+        if self.args.dataset in ['ogbg-moltox21', 'ogbg-molhiv']:
+            return x
+        else:
+            return F.log_softmax(x, dim=-1)
 
 
 class SDGNN_C2(nn.Module):
-    def __init__(self, input_dim, output_dim, config):
+    def __init__(self, input_dim, output_dim, config, args):
         super(SDGNN_C2, self).__init__()
 
         self.config = config
+        self.args = args
 
         self.linears = nn.ModuleList([
             nn.Linear(input_dim if i == 0 else config.hidden_dim, config.hidden_dim)
@@ -726,24 +634,28 @@ class SDGNN_C2(nn.Module):
 
         x = self.decoder(x)
 
-        return F.log_softmax(x, dim=-1)
+        if self.args.dataset in ['ogbg-moltox21', 'ogbg-molhiv']:
+            return x
+        else:
+            return F.log_softmax(x, dim=-1)
 
 
 class SDGNN_C3(nn.Module):
-    def __init__(self, input_size, output_size, num_perturbations, device, config, mlp_before_sum=True):
+    def __init__(self, input_size, output_size, num_perturbations, device, config, args, mlp_before_sum=True):
         super(SDGNN_C3, self).__init__()
 
         self.config = config
+        self.args = args
         self.mlp_before_sum = mlp_before_sum
         # MLP for individual perturbations
-        self.mlp_local = self.create_mlp(input_size, config.hidden_dim, config.ds_local_layers)
+        self.mlp_local = create_mlp(input_size, config.hidden_dim, config.ds_local_layers_merge, config)
 
         # MLP for aggregation
-        self.mlp_global = self.create_mlp(config.hidden_dim, config.hidden_dim, config.ds_global_layers)
+        self.mlp_global = create_mlp(config.hidden_dim, config.hidden_dim, config.ds_global_layers_merge, config)
 
         if mlp_before_sum:
-            self.mlp_before_sum = self.create_mlp(config.hidden_dim, config.hidden_dim, config.num_layers,
-                                                  use_dropout=True)
+            self.mlp_before_sum = create_mlp(config.hidden_dim, config.hidden_dim, config.num_layers, config,
+                                             use_dropout=True)
 
         if self.config.graph_pooling == 'sum':
             self.pool = global_add_pool
@@ -759,21 +671,6 @@ class SDGNN_C3(nn.Module):
         self.device = device
 
         self.reset_parameters()
-
-    def create_mlp(self, input_size, hidden_size, num_layers, use_dropout=False):
-        layers = []
-        for _ in range(num_layers):
-            layers.append(nn.Linear(input_size, hidden_size))
-            if self.config.batch_norm:
-                layers.append(nn.BatchNorm1d(hidden_size))
-            if self.config.activation == 'ELU':
-                layers.append(nn.ELU())
-            else:
-                layers.append(nn.ReLU())
-            if use_dropout:
-                layers.append(nn.Dropout(self.config.dropout))
-            input_size = hidden_size
-        return nn.Sequential(*layers)
 
     def reset_parameters(self):
         for m in self.modules():
@@ -812,50 +709,53 @@ class SDGNN_C3(nn.Module):
 
         x = self.decoder(x)
 
-        return F.log_softmax(x, dim=-1)
+        if self.args.dataset in ['ogbg-moltox21', 'ogbg-molhiv']:
+            return x
+        else:
+            return F.log_softmax(x, dim=-1)
 
 
 class SDGNN_C4(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, num_perturbations, mlp_local_layers,
-                 mlp_global_layers, device, config):
+    def __init__(self, input_size, output_size, num_perturbations, device, config, args, mlp_before_sum=True):
         super(SDGNN_C4, self).__init__()
 
-        self.hidden_size = hidden_size
         self.k = config.k
+        self.args
         self.num_perturbations = num_perturbations
         self.device = device
 
-        self.mlp_local_combine = MLP(in_channels=input_size, hidden_channels=hidden_size, out_channels=hidden_size,
-                                     num_layers=mlp_local_layers, plain_last=False)
+        self.mlp_local_combine = create_mlp(input_size, config.hidden_dim, config.ds_local_layers_comb, config)
 
-        self.mlp_global_combine = MLP(in_channels=hidden_size, hidden_channels=hidden_size, out_channels=hidden_size,
-                                      num_layers=mlp_global_layers, plain_last=False)
+        self.mlp_global_combine = create_mlp(config.hidden_dim, config.hidden_dim, config.ds_global_layers_comb,
+                                             config)
 
-        self.mlp_local_merge = MLP(in_channels=hidden_size, hidden_channels=hidden_size, out_channels=hidden_size,
-                                   num_layers=mlp_local_layers, plain_last=False)
+        self.mlp_local_merge = create_mlp(config.hidden_dim, config.hidden_dim, config.ds_local_layers_merge, config)
 
-        self.mlp_global_merge = MLP(in_channels=hidden_size, hidden_channels=hidden_size, out_channels=hidden_size,
-                                    num_layers=mlp_global_layers, plain_last=False)
+        self.mlp_global_merge = create_mlp(config.hidden_dim, config.hidden_dim, config.ds_global_layers_merge,
+                                           config)
+
+        if mlp_before_sum:
+            self.mlp_before_sum = create_mlp(config.hidden_dim, config.hidden_dim, config.num_layers, config,
+                                             use_dropout=True)
 
         if config.graph_pooling == 'sum':
             self.pool = global_add_pool
         elif config.graph_pooling == 'attention_agg':
             self.pool = AttentionalAggregation(
-                gate_nn=torch.nn.Sequential(torch.nn.Linear(hidden_size, 2 * hidden_size),
-                                            torch.nn.BatchNorm1d(2 * hidden_size), torch.nn.ReLU(),
-                                            torch.nn.Linear(2 * hidden_size, 1)))
+                gate_nn=torch.nn.Sequential(torch.nn.Linear(config.hidden_dim, 2 * config.hidden_dim),
+                                            torch.nn.BatchNorm1d(2 * config.hidden_dim), torch.nn.ReLU(),
+                                            torch.nn.Linear(2 * config.hidden_dim, 1)))
 
-        self.decoder = Decoder(hidden_size, output_size, config.decoder_layers, config.dropout, config)
+        self.decoder = Decoder(config.hidden_dim, output_size, config)
 
         self.reset_parameters()
 
     def reset_parameters(self):
-        reset(self.mlp_local_combine)
-        reset(self.mlp_global_combine)
-        reset(self.mlp_local_merge)
-        reset(self.mlp_global_merge)
-        reset(self.pool)
-        reset(self.decoder)
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                m.reset_parameters()
+            elif isinstance(m, nn.BatchNorm1d):
+                m.reset_parameters()
 
     def forward(self, data):
 
@@ -903,11 +803,17 @@ class SDGNN_C4(nn.Module):
 
         ds_output = self.mlp_global_merge(aggregated_output)
 
+        if self.mlp_before_sum:
+            ds_output = self.mlp_before_sum(ds_output)
+
         x = self.pool(ds_output, batch_indexing)
 
         x = self.decoder(x)
 
-        return F.log_softmax(x, dim=-1)
+        if self.args.dataset in ['ogbg-moltox21', 'ogbg-molhiv']:
+            return x
+        else:
+            return F.log_softmax(x, dim=-1)
 
 
 def train(model, loader, optimizer, device):
@@ -943,21 +849,7 @@ def count_parameters(model):
 
 
 def main(config=None):
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', type=str, choices=['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES',
-                                                        'PTC_GIN', 'NCI1', 'NCI109', 'COLLAB'], default='PROTEINS',
-                        help="Options are ['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES', 'PTC_GIN', "
-                             "'NCI1', 'NCI109']")
-    parser.add_argument('--seed', type=int, default=0, help='seed for reproducibility')
-    # parser.add_argument('--ds_local_layers', type=int, default=2, help='number of local layers in deepset')
-    # parser.add_argument('--ds_global_layers', type=int, default=4, help='number of global layers in deepset')
-    parser.add_argument('--epochs', type=int, default=350, help='maximum number of epochs')
-    # parser.add_argument('--min_delta', type=float, default=0.001, help='min_delta in early stopping')
-    # parser.add_argument('--patience', type=int, default=100, help='patience in early stopping')
-    parser.add_argument('--configuration', type=str, default="c2",
-                        choices=["c1", "c2", "c3", "c4", "sign", "sgcn"],
-                        help='which configuration to be used')
-    args = parser.parse_args()
+    args = Args()
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -1032,21 +924,20 @@ def main(config=None):
         skf_splits = separate_data(len(enriched_dataset), n_splits, args.seed)
 
         if args.configuration == "c1":
-            model = SDGNN_C1(enriched_dataset.num_features, enriched_dataset.num_classes, config).to(device)
+            model = SDGNN_C1(enriched_dataset.num_features, enriched_dataset.num_classes, config, args).to(device)
 
         elif args.configuration == "c2":
-            model = SDGNN_C2(enriched_dataset.num_features, enriched_dataset.num_classes, config).to(device)
+            model = SDGNN_C2(enriched_dataset.num_features, enriched_dataset.num_classes, config, args).to(device)
 
         elif args.configuration == "c3":
             model = SDGNN_C3(enriched_dataset.num_features, enriched_dataset.num_classes, num_perturbations, device,
-                             config).to(device)
+                             config, args).to(device)
 
         elif args.configuration == "c4":
-            model = SDGNN_C4(enriched_dataset.num_features, config.hidden_dim, enriched_dataset.num_classes,
-                             num_perturbations, config.ds_local_layers, config.ds_global_layers, device,
-                             config).to(device)
+            model = SDGNN_C4(enriched_dataset.num_features, enriched_dataset.num_classes, num_perturbations, device,
+                             config, args).to(device)
         else:
-            raise ValueError("Error in choosing hyper parameters for the model.")
+            raise ValueError("Error in choosing the model.")
 
         # Iterate through each fold
         for fold, (train_indices, test_indices) in enumerate(skf_splits):
