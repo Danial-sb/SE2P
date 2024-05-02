@@ -27,25 +27,25 @@ sweep_config = {
     "metric": {"name": "test_acc", "goal": "maximize"},
     "parameters": {
         "lr": {"values": [0.01]},
-        "num_layers": {"values": [1, 2, 3]},
+        "num_layers": {"values": [4]},
         "batch_norm": {"values": [True]},
-        "batch_size": {"values": [32, 64]},
-        "dropout": {"values": [0.2, 0.5]},  # if used for c2, use for c3 and others too.
+        "batch_size": {"values": [64]},
+        "dropout": {"values": [0.5]},  # if used for c2, use for c3 and others too.
         "normalization": {"values": ["After"]},
         "k": {"values": [3]},
         # TODO specify for which was 2 and which was 3. pro(3 or 2?) ptc(3) imdbm & b (2) collab (2) mutag (3)
         "sum_or_cat": {"values": ["cat"]},
         "decoder_layers": {"values": [2]},  # in the previous code 2 layers were used with hidden factor 2
         "activation": {"values": ["ELU"]},
-        "ds_local_layers_comb": {"values": [1, 2]},
-        "ds_global_layers_comb": {"values": [2]},
-        "ds_local_layers_merge": {"values": [1, 2]},
-        "ds_global_layers_merge": {"values": [2]},
-        "hidden_dim": {"values": [16, 32]},
+        # "ds_local_layers_comb": {"values": [2]},
+        # "ds_global_layers_comb": {"values": [2]},
+        "ds_local_layers_merge": {"values": [1, 2, 3, 4]},
+        "ds_global_layers_merge": {"values": [1, 2, 3, 4]},
+        "hidden_dim": {"values": [32]},
         "graph_pooling": {"values": ["sum"]},
     }
 }
-sweep_id = wandb.sweep(sweep_config, project="test")
+sweep_id = wandb.sweep(sweep_config, project="MUTAG-C3")
 
 
 def separate_data(dataset_len, n_splits, seed):
@@ -720,7 +720,7 @@ class SDGNN_C4(nn.Module):
         super(SDGNN_C4, self).__init__()
 
         self.k = config.k
-        self.args
+        self.args = args
         self.num_perturbations = num_perturbations
         self.device = device
 
@@ -889,7 +889,7 @@ def main(config=None):
     wandb.login()
     with wandb.init(config=config):
         config = wandb.config
-        print(args)
+        # print(args)
         name = f"enriched_{args.dataset}_{args.configuration}"
         start_time = time.time()
         enriched_dataset = EnrichedGraphDataset(os.path.join(current_path, 'enriched_dataset'), name, dataset, p=p,
