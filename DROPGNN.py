@@ -1,12 +1,9 @@
-import argparse
-import os.path as osp
 import numpy as np
 import time
 import torch
 from torch import nn
 import torch.nn.functional as F
 from torch.utils.data import RandomSampler
-from torch_geometric.datasets import TUDataset
 from torch_geometric.loader import DataLoader
 from torch_geometric.loader.dataloader import Collater
 from torch_geometric.utils import degree
@@ -15,8 +12,7 @@ from sklearn.model_selection import StratifiedKFold, KFold
 import logging
 import random
 from test_tube import HyperOptArgumentParser
-from ptc_dataset import PTCDataset
-from SDGNN import FeatureDegree
+from datasets import get_dataset
 
 logging.basicConfig(filename='log/DropGCN_IMDBM.log', level=logging.INFO, format='%(asctime)s - %(message)s')
 
@@ -25,81 +21,7 @@ def main(args, cluster=None):
     print(args, flush=True)
 
     BATCH = args.batch_size
-
-    if 'IMDB' in args.dataset:  # IMDB-BINARY or #IMDB-MULTI
-        class MyFilter(object):
-            def __call__(self, data):
-                return data.num_nodes <= 70
-
-        class MyPreTransform(object):
-            def __call__(self, data):
-                data.x = degree(data.edge_index[0], data.num_nodes, dtype=torch.long)
-                data.x = F.one_hot(data.x, num_classes=69).to(torch.float)  # 136 in k-gnn?
-                return data
-
-        path = osp.join(
-            osp.dirname(osp.realpath(__file__)), 'data', f'{args.dataset}')
-        dataset = TUDataset(
-            path,
-            name=args.dataset,
-            pre_transform=MyPreTransform(),
-            pre_filter=MyFilter())
-    elif 'MUTAG' in args.dataset:
-        class MyFilter(object):
-            def __call__(self, data):
-                return True
-
-        path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', 'MUTAG')
-        dataset = TUDataset(path, name='MUTAG', pre_filter=MyFilter())
-    elif 'PROTEINS' in args.dataset:
-        class MyFilter(object):
-            def __call__(self, data):
-                return not (data.num_nodes == 7 and data.num_edges == 12) and data.num_nodes < 450
-
-        path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', 'PROTEINS')
-        dataset = TUDataset(path, name='PROTEINS', pre_filter=MyFilter())
-
-    elif 'ENZYMES' in args.dataset:
-        class MyFilter(object):
-            def __call__(self, data):
-                return data.num_nodes < 95
-
-        path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', 'ENZYMES')
-        dataset = TUDataset(path, name='ENZYMES', pre_filter=MyFilter())
-
-    elif 'PTC_GIN' in args.dataset:
-        class MyFilter(object):
-            def __call__(self, data):
-                return True
-
-        path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', 'PTC_GIN')
-        dataset = PTCDataset(path, name='PTC')
-
-    # elif 'NCI1' in args.dataset:
-    #     class MyFilter(object):
-    #         def __call__(self, data):
-    #             return True
-    #
-    #     path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', 'NCI1')
-    #     dataset = TUDataset(path, name='NCI1', pre_filter=MyFilter())
-
-    elif 'NCI109' in args.dataset:
-        class MyFilter(object):
-            def __call__(self, data):
-                return True
-
-        path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', 'NCI109')
-        dataset = TUDataset(path, name='NCI109', pre_filter=MyFilter())
-
-    elif 'COLLAB' in args.dataset:
-
-        path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', 'COLLAB')
-        dataset = TUDataset(path, name='COLLAB', transform=FeatureDegree(max_degree=491, cat=False))
-
-    else:
-        raise ValueError("Invalid dataset name")
-
-    print(dataset)
+    dataset = get_dataset(args)
 
     # Set the sampling probability and number of runs/samples for the DropGIN
     n = []
@@ -202,6 +124,7 @@ def main(args, cluster=None):
                     out = x
                 else:
                     out += x
+
             return F.log_softmax(out, dim=-1)
 
     # class GCN(nn.Module):
@@ -380,6 +303,7 @@ def main(args, cluster=None):
                     out = x
                 else:
                     out += x
+
             return F.log_softmax(out, dim=-1)
 
     class DropGIN(nn.Module):
@@ -449,6 +373,7 @@ def main(args, cluster=None):
                     out = x
                 else:
                     out += x
+
             return F.log_softmax(out, dim=-1)
 
     def train(model, loader, optimizer, device):
@@ -580,7 +505,8 @@ def main(args, cluster=None):
             dataset[train_indices.tolist()],
             sampler=RandomSampler(dataset[train_indices.tolist()], replacement=True,
                                   num_samples=int(
-                                      len(train_indices.tolist()) * 50 / (len(train_indices.tolist()) / args.batch_size)),
+                                      len(train_indices.tolist()) * 50 / (
+                                                  len(train_indices.tolist()) / args.batch_size)),
                                   generator=generator),
             batch_size=args.batch_size, drop_last=False,
             collate_fn=Collater(follow_batch=[], exclude_keys=[]))
@@ -614,7 +540,7 @@ def main(args, cluster=None):
             end_time_epoch = time.time()
             elapsed_time_epoch = end_time_epoch - start_time_epoch
             time_per_epoch.append(elapsed_time_epoch)
-            if epoch % 50 == 0:
+            if epoch % 50 == 0 or epoch == 1:
                 print(f'Epoch: {epoch:02d} | TrainLoss: {train_loss:.3f} | Test_acc: {test_acc:.3f} | Time'
                       f'epoch: {elapsed_time_epoch:.2f} | Memory Allocated: {memory_allocated} MB | Memory '
                       f'Reserved: {memory_reserved} MB | LR: {lr:.6f}')
@@ -623,10 +549,10 @@ def main(args, cluster=None):
                              f'Reserved: {memory_reserved} MB | LR: {lr:.6f}')
             validation_accuracies.append(test_acc)
 
-        print(f'Average time per epoch in fold {fold+1} and seed {args.seed}: {np.mean(time_per_epoch)}')
-        print(f'Std time per epoch in fold {fold+1} and seed {args.seed}: {np.std(time_per_epoch)}')
-        logging.info(f'Average time per epoch in fold {fold+1} and seed {args.seed}: {np.mean(time_per_epoch)}')
-        logging.info(f'Std time per epoch in fold {fold+1} and seed {args.seed}: {np.std(time_per_epoch)}')
+        print(f'Average time per epoch in fold {fold + 1} and seed {args.seed}: {np.mean(time_per_epoch)}')
+        print(f'Std time per epoch in fold {fold + 1} and seed {args.seed}: {np.std(time_per_epoch)}')
+        logging.info(f'Average time per epoch in fold {fold + 1} and seed {args.seed}: {np.mean(time_per_epoch)}')
+        logging.info(f'Std time per epoch in fold {fold + 1} and seed {args.seed}: {np.std(time_per_epoch)}')
         all_validation_accuracies.append(torch.tensor(validation_accuracies))
         # Print fold training time
         end_time_fold = time.time()
@@ -666,6 +592,8 @@ def main(args, cluster=None):
         f'seed {args.seed}: {std_at_max_avg_validation_acc_epoch}')
     logging.info(f'Average time taken for each fold in seed {args.seed}: {np.mean(time_seed)}')
     logging.info(f'STD time taken for each fold in seed {args.seed}: {np.std(time_seed)}')
+
+
 #
 # # print("======================================")
 # print(f'Test accuracy for all the seeds: {np.mean(final_acc)}')
@@ -687,7 +615,7 @@ if __name__ == '__main__':
     # parser.add_argument('--batch_size', type=int, default=64, help='batch size')
     # parser.add_argument('--seed', type=int, default=1234, help='seed for reproducibility')
     parser.add_argument('--lr', type=float, default=0.01, help='learning rate')
-    parser.add_argument('--model', type=str, choices=['GIN', 'DropGIN', 'GCN', 'DropGCN'], default="DropGCN")
+    parser.add_argument('--model', type=str, choices=['GIN', 'DropGIN', 'GCN', 'DropGCN'], default="GCN")
     # parser.add_argument('--hidden_units', type=int, default=64, choices=[32, 64])
     # parser.add_argument('--dropout', type=float, choices=[0.5, 0.2], default=0.5, help='dropout probability')
     parser.add_argument('--epochs', type=int, default=350, help='maximum number of epochs')

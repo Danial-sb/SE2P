@@ -15,7 +15,6 @@ from torch.nn.functional import pad
 from sklearn.model_selection import StratifiedKFold
 from torch_geometric.loader.dataloader import Collater
 import time
-import argparse
 from torch_geometric.data import Data, InMemoryDataset
 import wandb
 from torch_geometric.nn.aggr import AttentionalAggregation
@@ -29,23 +28,23 @@ sweep_config = {
         "lr": {"values": [0.01]},
         "num_layers": {"values": [4]},
         "batch_norm": {"values": [True]},
-        "batch_size": {"values": [64]},
+        "batch_size": {"values": [32]},
         "dropout": {"values": [0.5]},  # if used for c2, use for c3 and others too.
         "normalization": {"values": ["After"]},
-        "k": {"values": [3]},
+        "k": {"values": [2]},
         # TODO specify for which was 2 and which was 3. pro(3 or 2?) ptc(3) imdbm & b (2) collab (2) mutag (3)
         "sum_or_cat": {"values": ["cat"]},
         "decoder_layers": {"values": [2]},  # in the previous code 2 layers were used with hidden factor 2
         "activation": {"values": ["ELU"]},
-        # "ds_local_layers_comb": {"values": [2]},
-        # "ds_global_layers_comb": {"values": [2]},
-        "ds_local_layers_merge": {"values": [1, 2, 3, 4]},
-        "ds_global_layers_merge": {"values": [1, 2, 3, 4]},
+        "ds_local_layers_comb": {"values": [1, 2, 3, 4]},
+        "ds_global_layers_comb": {"values": [1, 2, 3, 4]},
+        "ds_local_layers_merge": {"values": [3]},
+        "ds_global_layers_merge": {"values": [3]},
         "hidden_dim": {"values": [32]},
         "graph_pooling": {"values": ["sum"]},
     }
 }
-sweep_id = wandb.sweep(sweep_config, project="MUTAG-C3")
+sweep_id = wandb.sweep(sweep_config, project="IMDBM-C4")
 
 
 def separate_data(dataset_len, n_splits, seed):
