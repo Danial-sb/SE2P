@@ -14,7 +14,7 @@ import random
 from test_tube import HyperOptArgumentParser
 from datasets import get_dataset
 
-logging.basicConfig(filename='log/DropGCN_IMDBM.log', level=logging.INFO, format='%(asctime)s - %(message)s')
+logging.basicConfig(filename='log/GCN_PTC_NEW.log', level=logging.INFO, format='%(asctime)s - %(message)s')
 
 
 def main(args, cluster=None):
@@ -606,11 +606,11 @@ def main(args, cluster=None):
 if __name__ == '__main__':
     parser = HyperOptArgumentParser(strategy='grid_search')
     parser.add_argument('--dataset', type=str, choices=['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES',
-                                                        'PTC_GIN', 'NCI109', 'COLLAB'], default='MUTAG',
+                                                        'PTC_GIN', 'NCI109', 'COLLAB'], default='PTC_GIN',
                         help="Options are ['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES', 'PTC_GIN']")
-    parser.opt_list('--dropout', type=float, default=0.0, tunable=True, options=[0.5, 0.0])
-    parser.opt_list('--batch_size', type=int, default=128, tunable=True, options=[32, 128])
-    parser.opt_list('--hidden_units', type=int, default=64, tunable=True, options=[64])
+    parser.opt_list('--dropout', type=float, default=0.5, tunable=True, options=[0.5, 0.0])
+    parser.opt_list('--batch_size', type=int, default=32, tunable=True, options=[32, 64])
+    parser.opt_list('--hidden_units', type=int, default=16, tunable=True, options=[16, 32])
     parser.add_argument('--seed', type=int, default=0, help='seed for reproducibility')
     # parser.add_argument('--batch_size', type=int, default=64, help='batch size')
     # parser.add_argument('--seed', type=int, default=1234, help='seed for reproducibility')
@@ -619,7 +619,7 @@ if __name__ == '__main__':
     # parser.add_argument('--hidden_units', type=int, default=64, choices=[32, 64])
     # parser.add_argument('--dropout', type=float, choices=[0.5, 0.2], default=0.5, help='dropout probability')
     parser.add_argument('--epochs', type=int, default=350, help='maximum number of epochs')
-    parser.add_argument('--grid_search', action='store_true', default=False, help='whether to do grid search')
+    parser.add_argument('--grid_search', action='store_true', default=True, help='whether to do grid search')
     # parser.add_argument('--min_delta', type=float, default=0.001, help='min_delta in early stopping')
     # parser.add_argument('--patience', type=int, default=100, help='patience in early stopping')
 
