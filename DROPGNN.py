@@ -14,7 +14,7 @@ import random
 from test_tube import HyperOptArgumentParser
 from datasets import get_dataset
 
-logging.basicConfig(filename='log/GCN_PTC_NEW.log', level=logging.INFO, format='%(asctime)s - %(message)s')
+logging.basicConfig(filename='log/DropGCN_IMDBM_NEW.log', level=logging.INFO, format='%(asctime)s - %(message)s')
 
 
 def main(args, cluster=None):
@@ -606,16 +606,16 @@ def main(args, cluster=None):
 if __name__ == '__main__':
     parser = HyperOptArgumentParser(strategy='grid_search')
     parser.add_argument('--dataset', type=str, choices=['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES',
-                                                        'PTC_GIN', 'NCI109', 'COLLAB'], default='PTC_GIN',
+                                                        'PTC_GIN', 'NCI109', 'COLLAB'], default='IMDB-MULTI',
                         help="Options are ['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES', 'PTC_GIN']")
     parser.opt_list('--dropout', type=float, default=0.5, tunable=True, options=[0.5, 0.0])
     parser.opt_list('--batch_size', type=int, default=32, tunable=True, options=[32, 64])
-    parser.opt_list('--hidden_units', type=int, default=16, tunable=True, options=[16, 32])
+    parser.opt_list('--hidden_units', type=int, default=32, tunable=True, options=[32, 64])
     parser.add_argument('--seed', type=int, default=0, help='seed for reproducibility')
     # parser.add_argument('--batch_size', type=int, default=64, help='batch size')
     # parser.add_argument('--seed', type=int, default=1234, help='seed for reproducibility')
     parser.add_argument('--lr', type=float, default=0.01, help='learning rate')
-    parser.add_argument('--model', type=str, choices=['GIN', 'DropGIN', 'GCN', 'DropGCN'], default="GCN")
+    parser.add_argument('--model', type=str, choices=['GIN', 'DropGIN', 'GCN', 'DropGCN'], default="DropGCN")
     # parser.add_argument('--hidden_units', type=int, default=64, choices=[32, 64])
     # parser.add_argument('--dropout', type=float, choices=[0.5, 0.2], default=0.5, help='dropout probability')
     parser.add_argument('--epochs', type=int, default=350, help='maximum number of epochs')

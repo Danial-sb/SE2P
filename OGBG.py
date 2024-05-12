@@ -1,5 +1,8 @@
-from SDGNN import *
-from ogb.graphproppred import PygGraphPropPredDataset
+import torch
+import os
+import random
+from SDGNN import EnrichedGraphDataset, SDGNN_C1, SDGNN_C2, SDGNN_C3, SDGNN_C4, count_parameters, sweep_id
+from datasets import get_dataset
 from torch_geometric.loader import DataLoader
 import torch.nn as nn
 import torch.nn.functional as F
@@ -8,80 +11,8 @@ from ogb.graphproppred import Evaluator
 from torch_geometric.utils import degree
 import time
 from torch_geometric.nn import GCNConv, global_add_pool, GINConv
-import argparse
 import wandb
-import os.path as osp
-
-
-def get_ogb(args):
-    if 'ogbg-molhiv' in args.dataset:
-        path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', 'ogbg-molhiv')
-        dataset = PygGraphPropPredDataset(name="ogbg-molhiv", root=path)
-    elif 'ogbg-molpcba' in args.dataset:
-        path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', 'ogbg-molpcba')
-        dataset = PygGraphPropPredDataset(name="ogbg-molpcba", root=path)
-    elif 'ogbg-moltox21' in args.dataset:
-        path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', 'ogbg-moltox21')
-        dataset = PygGraphPropPredDataset(name="ogbg-moltox21", root=path)
-    else:
-        raise ValueError("Invalid dataset name")
-
-    return dataset
-
-
-class SDGNN_ogb(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim, dropout, num_layers, batch_norm=True):
-        super(SDGNN_ogb, self).__init__()
-
-        self.num_layers = num_layers
-        self.batch_norm = batch_norm
-
-        self.linears = nn.ModuleList([
-            nn.Linear(input_dim if i == 0 else hidden_dim, hidden_dim)
-            for i in range(num_layers)
-        ])
-
-        if self.batch_norm:
-            self.bns = nn.ModuleList([
-                nn.BatchNorm1d(hidden_dim)
-                for _ in range(num_layers)
-            ])
-
-        self.activation = nn.ELU()
-        self.linear3 = nn.Linear(hidden_dim, hidden_dim // 2)
-        self.linear4 = nn.Linear(hidden_dim // 2, output_dim)
-        self.dropout = dropout
-
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        for linear in self.linears:
-            linear.reset_parameters()
-        self.linear3.reset_parameters()
-        self.linear4.reset_parameters()
-        if self.batch_norm:
-            for bn in self.bns:
-                bn.reset_parameters()
-
-    def forward(self, data):
-        x = data.x
-        batch = data.batch
-
-        for i in range(self.num_layers):
-            x = self.linears[i](x)
-            if self.batch_norm:
-                x = self.bns[i](x)
-            x = self.activation(x)
-            x = F.dropout(x, p=self.dropout, training=self.training)
-
-        x = global_add_pool(x, batch)
-
-        x = self.linear3(x)
-        x = self.activation(x)
-        x = F.dropout(x, p=self.dropout, training=self.training)
-
-        x = self.linear4(x)
-        return x
+from args import Args
 
 
 class GIN_ogb(nn.Module):
@@ -143,22 +74,22 @@ class GIN_ogb(nn.Module):
         return out
 
 
-class CustomGCNConv_ogb(nn.Module):
-    def __init__(self, input_dim, output_dim):
-        super(CustomGCNConv_ogb, self).__init__()
-        self.linear_1 = nn.Linear(input_dim, output_dim)
-        self.bn = nn.BatchNorm1d(output_dim)
-        self.relu = nn.ReLU()
-        self.linear_2 = nn.Linear(output_dim, output_dim)
-        self.gcnconv = GCNConv(output_dim, output_dim)  # Using GCNConv with specified dimensions
-
-    def forward(self, x, edge_index):
-        x = self.linear_1(x)
-        x = self.bn(x)
-        x = self.relu(x)
-        x = self.linear_2(x)
-        x = self.gcnconv(x, edge_index)
-        return x
+# class CustomGCNConv_ogb(nn.Module):
+#     def __init__(self, input_dim, output_dim):
+#         super(CustomGCNConv_ogb, self).__init__()
+#         self.linear_1 = nn.Linear(input_dim, output_dim)
+#         self.bn = nn.BatchNorm1d(output_dim)
+#         self.relu = nn.ReLU()
+#         self.linear_2 = nn.Linear(output_dim, output_dim)
+#         self.gcnconv = GCNConv(output_dim, output_dim)  # Using GCNConv with specified dimensions
+#
+#     def forward(self, x, edge_index):
+#         x = self.linear_1(x)
+#         x = self.bn(x)
+#         x = self.relu(x)
+#         x = self.linear_2(x)
+#         x = self.gcnconv(x, edge_index)
+#         return x
 
 
 class GCN_ogb(nn.Module):
@@ -175,13 +106,13 @@ class GCN_ogb(nn.Module):
         self.bns = nn.ModuleList()
         self.fcs = nn.ModuleList()
 
-        self.convs.append(CustomGCNConv_ogb(num_features, dim))
+        self.convs.append(GCNConv(num_features, dim))
         self.bns.append(nn.BatchNorm1d(dim))
         self.fcs.append(nn.Linear(num_features, output))
         self.fcs.append(nn.Linear(dim, output))
 
         for i in range(self.num_layers - 1):
-            self.convs.append(CustomGCNConv_ogb(dim, dim))
+            self.convs.append(GCNConv(dim, dim))
             self.bns.append(nn.BatchNorm1d(dim))
             self.fcs.append(nn.Linear(dim, output))
         self.reset_parameters()
@@ -231,13 +162,13 @@ class DropGCN_ogb(nn.Module):
         self.bns = nn.ModuleList()
         self.fcs = nn.ModuleList()
 
-        self.convs.append(CustomGCNConv_ogb(num_features, dim))
+        self.convs.append(GCNConv(num_features, dim))
         self.bns.append(nn.BatchNorm1d(dim))
         self.fcs.append(nn.Linear(num_features, output))
         self.fcs.append(nn.Linear(dim, output))
 
         for i in range(self.num_layers - 1):
-            self.convs.append(CustomGCNConv_ogb(dim, dim))
+            self.convs.append(GCNConv(dim, dim))
             self.bns.append(nn.BatchNorm1d(dim))
             self.fcs.append(nn.Linear(dim, output))
         self.reset_parameters()
@@ -357,93 +288,6 @@ class DropGIN_ogb(nn.Module):
         return out
 
 
-class DeepSet_ogb(nn.Module):
-    def __init__(self, input_size, hidden_size, num_perturbations, max_nodes):
-        super(DeepSet_ogb, self).__init__()
-
-        self.hidden_size = hidden_size
-        # MLP for individual perturbations
-        self.mlp_perturbation = nn.Sequential(
-            nn.Linear(input_size, hidden_size),
-            nn.BatchNorm1d(hidden_size),
-            nn.ELU(),
-            nn.Linear(hidden_size, hidden_size),
-            nn.ELU()
-        )
-
-        # MLP for aggregation
-        self.mlp_aggregation = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size),
-            nn.BatchNorm1d(hidden_size),
-            nn.ELU(),
-            nn.Linear(hidden_size, hidden_size),
-            nn.ELU()
-        )
-
-        self.num_perturbations = num_perturbations
-        self.max_nodes = max_nodes
-
-    def forward(self, input_data):
-        x = self.mlp_perturbation(input_data)
-
-        x_transformed = x.view(-1, self.num_perturbations, self.max_nodes, self.hidden_size)
-        aggregated_output = torch.sum(x_transformed, dim=1)
-        aggregated_output = aggregated_output.view(-1, self.hidden_size)
-
-        final_output = self.mlp_aggregation(aggregated_output)
-
-        return final_output
-
-
-class SDGNN_Deepset_ogb(nn.Module):
-    def __init__(self, input_dim, hidden_dim, dropout, num_perturbations, max_nodes, output_dim):
-        super(SDGNN_Deepset_ogb, self).__init__()
-
-        self.num_perturbations = num_perturbations
-
-        self.deepset_aggregator = DeepSet_ogb(input_dim, hidden_dim, num_perturbations, max_nodes)
-
-        self.linear1 = nn.Linear(hidden_dim, hidden_dim)
-        self.bn1 = nn.BatchNorm1d(hidden_dim)
-        self.elu = nn.ELU()
-        self.linear2 = nn.Linear(hidden_dim, hidden_dim // 2)
-        self.bn2 = nn.BatchNorm1d(hidden_dim // 2)
-        self.linear3 = nn.Linear(hidden_dim // 2, hidden_dim // 4)
-        self.bn3 = nn.BatchNorm1d(hidden_dim // 4)
-        self.linear4 = nn.Linear(hidden_dim // 4, output_dim)
-        self.dropout = dropout
-
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                m.reset_parameters()
-            elif isinstance(m, nn.BatchNorm1d):
-                m.reset_parameters()
-
-    def forward(self, data):
-        x = data.x
-        batch = data.batch
-
-        aggregated_features = self.deepset_aggregator(x)
-        batch = batch.view(-1, self.num_perturbations).to(torch.float).mean(dim=1).long()
-
-        x = self.elu(self.bn1(self.linear1(aggregated_features)))
-
-        x = self.elu(self.bn2(self.linear2(x)))
-        x = F.dropout(x, p=self.dropout, training=self.training)
-
-        x = global_add_pool(x, batch)
-
-        x = self.elu(self.bn3(self.linear3(x)))
-        x = F.dropout(x, p=self.dropout, training=self.training)
-
-        x = self.linear4(x)
-
-        return x
-
-
 def train_ogb(train_loader, model, optimizer, device):
     total_loss = 0
     N = 0
@@ -476,18 +320,9 @@ def test_ogb(loader, model, evaluator, device):
 
 
 def main(config=None):
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', type=str, choices=['ogbg-molhiv', 'ogbg-molpcba', "ogbg-moltox21"], default='ogbg-moltox21')
-    parser.add_argument('--epochs', type=int, default=100, help='maximum number of epochs')
-    parser.add_argument('--model', type=str, choices=['SDGNN_ogb', 'GIN_ogb', 'GCN_ogb', 'DropGIN_ogb',
-                                                      'DropGCN_ogb', 'SDGNN_deepset_ogb'], default='DropGCN_ogb')
-    # parser.add_argument('--dropout', type=float, choices=[0.5, 0.0], default=0.5, help='dropout probability')
-    parser.add_argument('--seed', type=int, default=0, help='seed for reproducibility')
-    parser.add_argument('--agg', type=str, default="mean", choices=["mean", "concat", "deepset"],
-                        help='Method for aggregating the perturbation')
-    args = parser.parse_args()
+    args = Args()
 
-    dataset = get_ogb(args)
+    dataset = get_dataset(args)
     print(dataset)
 
     n = []
@@ -514,6 +349,7 @@ def main(config=None):
     num_perturbations = gamma
     print(f'Number of perturbations: {num_perturbations}')
     print(f'Sampling probability: {p}')
+    print(f'Number of features: {dataset.num_features}')
 
     current_path = os.getcwd()
     seeds_to_test = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
@@ -526,18 +362,18 @@ def main(config=None):
             np.random.seed(seed)
             random.seed(seed)
             config = wandb.config
-            print(args)
+            # print(args)
 
-            if args.model == 'SDGNN_ogb' or args.model == 'SDGNN_deepset_ogb':
-                name = f"enriched_{args.dataset}_{args.agg}"
+            if args.configuration == 'c1' or args.configuration == 'c2' or args.configuration == 'c3' or args.configuration == 'c4':
+                name = f"enriched_{args.dataset}_{args.configuration}"
                 start_time = time.time()
-                enriched_dataset = EnrichedGraphDataset(os.path.join(current_path, 'enriched_dataset'), name, dataset, p=p,
-                                                        num_perturbations=num_perturbations, max_nodes=max_nodes,
-                                                        config=config,
+                enriched_dataset = EnrichedGraphDataset(os.path.join(current_path, 'enriched_dataset'), name, dataset,
+                                                        p=p, num_perturbations=num_perturbations, config=config,
                                                         args=args)
                 end_time = time.time()
                 elapsed_time = end_time - start_time
                 print(f"Done! Time taken: {elapsed_time:.2f} seconds")
+                print(f'Number of enriched features: {enriched_dataset.num_features}')
 
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             # device = torch.device('cpu')
@@ -546,35 +382,49 @@ def main(config=None):
                 torch.cuda.manual_seed_all(seed)
 
             split_idx = dataset.get_idx_split()
-            if args.model == 'SDGNN_ogb' or args.model == 'SDGNN_deepset_ogb':
-                train_loader = DataLoader(enriched_dataset[split_idx["train"]], batch_size=config.batch_size, shuffle=True)
-                valid_loader = DataLoader(enriched_dataset[split_idx["valid"]], batch_size=config.batch_size, shuffle=False)
-                test_loader = DataLoader(enriched_dataset[split_idx["test"]], batch_size=config.batch_size, shuffle=False)
+            if args.configuration == 'c1' or args.configuration == 'c2' or args.configuration == 'c3' or args.configuration == 'c4':
+                train_loader = DataLoader(enriched_dataset[split_idx["train"]], batch_size=config.batch_size,
+                                          shuffle=True)
+                valid_loader = DataLoader(enriched_dataset[split_idx["valid"]], batch_size=config.batch_size,
+                                          shuffle=False)
+                test_loader = DataLoader(enriched_dataset[split_idx["test"]], batch_size=config.batch_size,
+                                         shuffle=False)
             else:
                 train_loader = DataLoader(dataset[split_idx["train"]], batch_size=config.batch_size, shuffle=True)
                 valid_loader = DataLoader(dataset[split_idx["valid"]], batch_size=config.batch_size, shuffle=False)
                 test_loader = DataLoader(dataset[split_idx["test"]], batch_size=config.batch_size, shuffle=False)
 
-            if args.model == 'SDGNN_ogb':
-                model = SDGNN_ogb(enriched_dataset.num_features, config.hidden_dim,
-                                  1 if args.dataset == 'ogbg-molhiv' else (12 if args.dataset == 'ogbg-moltox21' else 128),
-                                  config.dropout, config.num_layers, config.batch_norm).to(device)
-            elif args.model == 'GIN_ogb':
-                model = GIN_ogb(config, dataset, output=1 if args.dataset == 'ogbg-molhiv' else (12 if args.dataset == 'ogbg-moltox21' else 128)).to(device)
-            elif args.model == 'GCN_ogb':
-                model = GCN_ogb(config, dataset, output=1 if args.dataset == 'ogbg-molhiv' else (12 if args.dataset == 'ogbg-moltox21' else 128)).to(device)
-            elif args.model == 'DropGIN_ogb':
-                model = DropGIN_ogb(config, dataset, num_perturbations, p,
-                                    output=1 if args.dataset == 'ogbg-molhiv' else (12 if args.dataset == 'ogbg-moltox21' else 128)).to(
-                    device)
-            elif args.model == 'DropGCN_ogb':
+            if args.configuration == 'c1':
+                model = SDGNN_C1(enriched_dataset.num_features, 1 if args.dataset == 'ogbg-molhiv' else 12, config,
+                                 args).to(device)
+            elif args.configuration == 'c2':
+                model = SDGNN_C2(enriched_dataset.num_features, 1 if args.dataset == 'ogbg-molhiv' else 12, config,
+                                 args).to(device)
+
+            elif args.configuration == 'c3':
+                model = SDGNN_C3(enriched_dataset.num_features, 1 if args.dataset == 'ogbg-molhiv' else 12,
+                                 num_perturbations, device, config, args).to(device)
+
+            elif args.configuration == 'c4':
+                model = SDGNN_C4(enriched_dataset.num_features, 1 if args.dataset == 'ogbg-molhiv' else 12,
+                                 num_perturbations, device, config, args).to(device)
+
+            elif args.configuration == 'GIN_ogb':
+                model = GIN_ogb(config, dataset, output=1 if args.dataset == 'ogbg-molhiv' else 12).to(device)
+
+            elif args.configuration == 'GCN_ogb':
+                model = GCN_ogb(config, dataset, output=1 if args.dataset == 'ogbg-molhiv' else 12).to(device)
+
+            elif args.configuration == 'DropGIN_ogb':
+                model = DropGIN_ogb(config, dataset, num_perturbations, p, output=1 if args.dataset == 'ogbg-molhiv'
+                else 12).to(device)
+
+            elif args.configuration == 'DropGCN_ogb':
                 model = DropGCN_ogb(config, dataset, num_perturbations, p,
-                                    output=1 if args.dataset == 'ogbg-molhiv' else (12 if args.dataset == 'ogbg-moltox21' else 128)).to(
-                    device)
+                                    output=1 if args.dataset == 'ogbg-molhiv' else 12).to(device)
+
             else:
-                model = SDGNN_Deepset_ogb(enriched_dataset.num_features, config.hidden_dim, config.dropout,
-                                          num_perturbations, max_nodes,
-                                          output_dim=1 if args.dataset == 'ogbg-molhiv' else (12 if args.dataset == 'ogbg-moltox21' else 128)).to(device)
+                raise ValueError("Invalid model name")
 
             evaluator = Evaluator(name=args.dataset)
 
@@ -628,8 +478,9 @@ def main(config=None):
                           f' Memory allocated: {memory_allocated}, Memory Reserved: {memory_reserved}')
 
             time_average_epoch = time.time() - start_outer
-            print(f'Best Validation in seed {seed}: {best_val_perf}, Test in seed {seed}: {test_perf}, Seconds/epoch: {time_average_epoch / args.epochs},'
-                  f' Max memory allocated: {max_memory_allocated}, Max memory reserved: {max_memory_reserved}')
+            print(
+                f'Best Validation in seed {seed}: {best_val_perf}, Test in seed {seed}: {test_perf}, Seconds/epoch: {time_average_epoch / args.epochs},'
+                f' Max memory allocated: {max_memory_allocated}, Max memory reserved: {max_memory_reserved}')
             # wandb.log(
             #     {f'Best Validation in seed {seed}': best_val_perf,
             #      f'Best Test in seed {seed}': test_perf}
