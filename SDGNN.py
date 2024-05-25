@@ -26,25 +26,25 @@ sweep_config = {
     "metric": {"name": "test_acc", "goal": "maximize"},
     "parameters": {
         "lr": {"values": [0.01]},
-        "num_layers": {"values": [4]},
+        "num_layers": {"values": [2, 3, 4]},
         "batch_norm": {"values": [True]},
         "batch_size": {"values": [32]},
-        "dropout": {"values": [0.5]},  # if used for c2, use for c3 and others too.
+        "dropout": {"values": [0.2, 0.5]},  # if used for c2, use for c3 and others too.
         "normalization": {"values": ["After"]},
-        "k": {"values": [2]},
+        "k": {"values": [3]},
         # TODO specify for which was 2 and which was 3. pro(3 or 2?) ptc(3) imdbm & b (2) collab (2) mutag (3)
         "sum_or_cat": {"values": ["cat"]},
-        "decoder_layers": {"values": [2]},  # in the previous code 2 layers were used with hidden factor 2
-        "activation": {"values": ["ELU"]},
-        "ds_local_layers_comb": {"values": [1, 2, 3, 4]},
-        "ds_global_layers_comb": {"values": [1, 2, 3, 4]},
-        "ds_local_layers_merge": {"values": [3]},
-        "ds_global_layers_merge": {"values": [3]},
+        "decoder_layers": {"values": [2]},
+        "activation": {"values": ["ReLU"]},
+        # "ds_local_layers_comb": {"values": [2]},
+        # "ds_global_layers_comb": {"values": [2]},
+        "ds_local_layers_merge": {"values": [1, 2]},
+        "ds_global_layers_merge": {"values": [1, 2]},
         "hidden_dim": {"values": [32]},
         "graph_pooling": {"values": ["sum"]},
     }
 }
-sweep_id = wandb.sweep(sweep_config, project="IMDBM-C4")
+sweep_id = wandb.sweep(sweep_config, project="MUTAG-C3")
 
 
 def separate_data(dataset_len, n_splits, seed):
@@ -551,7 +551,7 @@ class SDGNN_C1(nn.Module):
         super(SDGNN_C1, self).__init__()
 
         self.args = args
-        self.decoder = Decoder(input_dim, output_dim, config, hidden_factor=2, batch_norm=config.batch_norm)
+        self.decoder = Decoder(input_dim, output_dim, config, hidden_factor=4, batch_norm=config.batch_norm)
 
         # self.decoder = MLP(in_channels=input_dim, hidden_channels=hidden_dim, out_channels=output_dim,
         #                    num_layers=decoder_layers, batch_norm="batch_norm" if config.batch_norm else None,
@@ -883,6 +883,7 @@ def main(config=None):
     num_perturbations = gamma
     print(f'Number of perturbations: {num_perturbations}')
     print(f'Sampling probability: {p}')
+    print(f'Number of features: {dataset.num_features}')
     current_path = os.getcwd()
 
     wandb.login()
@@ -925,7 +926,7 @@ def main(config=None):
         if args.configuration == "c1":
             model = SDGNN_C1(enriched_dataset.num_features, enriched_dataset.num_classes, config, args).to(device)
 
-        elif args.configuration == "c2":
+        elif args.configuration == "c2" or args.configuration == "sign" or args.configuration == "sgcn":
             model = SDGNN_C2(enriched_dataset.num_features, enriched_dataset.num_classes, config, args).to(device)
 
         elif args.configuration == "c3":
@@ -1018,8 +1019,10 @@ def main(config=None):
               f'{best_epoch_mean}')
         print(f'Standard Deviation for the results of epoch {best_epoch + 1} over all the folds '
               f'in seed {args.seed}: {std_at_max_avg_validation_acc_epoch}')
-        print(f'Average time taken for each fold in seed {args.seed}: {np.mean(time_seed)}')
-        print(f'STD time taken for each fold in seed {args.seed}: {np.std(time_seed)}')
+        print(f'Average total time taken for each fold in seed {args.seed}: {np.mean(time_seed)}')
+        print(f'STD total time taken for each fold in seed {args.seed}: {np.std(time_seed)}')
+        print(f'Average Time/Epoch in seed {args.seed}: {np.mean(time_per_epoch)}')
+        print(f'STD Time/Epoch in seed {args.seed}: {np.std(time_per_epoch)}')
 
         # print("=" * 30)
         # final_accuracy = np.mean(final_acc)
