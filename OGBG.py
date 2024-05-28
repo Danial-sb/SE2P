@@ -74,24 +74,6 @@ class GIN_ogb(nn.Module):
         return out
 
 
-# class CustomGCNConv_ogb(nn.Module):
-#     def __init__(self, input_dim, output_dim):
-#         super(CustomGCNConv_ogb, self).__init__()
-#         self.linear_1 = nn.Linear(input_dim, output_dim)
-#         self.bn = nn.BatchNorm1d(output_dim)
-#         self.relu = nn.ReLU()
-#         self.linear_2 = nn.Linear(output_dim, output_dim)
-#         self.gcnconv = GCNConv(output_dim, output_dim)  # Using GCNConv with specified dimensions
-#
-#     def forward(self, x, edge_index):
-#         x = self.linear_1(x)
-#         x = self.bn(x)
-#         x = self.relu(x)
-#         x = self.linear_2(x)
-#         x = self.gcnconv(x, edge_index)
-#         return x
-
-
 class GCN_ogb(nn.Module):
     def __init__(self, config, dataset, output):
         super(GCN_ogb, self).__init__()
@@ -345,7 +327,7 @@ def main(config=None):
     print(f'Number of graphs: {len(dataset)}')
     gamma = mean_n
     p = 2 * 1 / (1 + gamma)
-    # num_perturbations = round(gamma * np.log10(gamma))
+    # num_perturbations = round(gamma * np.log10(gamma)) # Commented out based on DropGNN code.
     num_perturbations = gamma
     print(f'Number of perturbations: {num_perturbations}')
     print(f'Sampling probability: {p}')
@@ -362,7 +344,6 @@ def main(config=None):
             np.random.seed(seed)
             random.seed(seed)
             config = wandb.config
-            # print(args)
 
             if args.configuration == 'c1' or args.configuration == 'c2' or args.configuration == 'c3' or args.configuration == 'c4':
                 name = f"enriched_{args.dataset}_{args.configuration}"
@@ -428,14 +409,12 @@ def main(config=None):
 
             evaluator = Evaluator(name=args.dataset)
 
-            print(f'Model learnable parameters: {count_parameters(model)}')
+            print(f'Model learnable parameters for {model.__class__.__name__}: {count_parameters(model)}')
             optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
             scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.5)
 
             start_outer = time.time()
             best_val_perf = test_perf = float('-inf')
-            # counter = 0
-            # patience = 80
             max_memory_allocated = 0
             max_memory_reserved = 0
             validation_perf = []
@@ -463,12 +442,6 @@ def main(config=None):
                     best_val_perf = val_perf
                     test_perf = test_ogb(test_loader, model, evaluator, device)
                 tests_perf.append(test_perf)
-                #     counter = 0
-                # else:
-                #     counter += 1
-                #     if counter >= patience:  # maybe remove when having several seeds
-                #         print(f'Early stopping at epoch {epoch} as no improvement seen in {patience} epochs.')
-                #         break
 
                 time_per_epoch = time.time() - start
 
@@ -481,10 +454,6 @@ def main(config=None):
             print(
                 f'Best Validation in seed {seed}: {best_val_perf}, Test in seed {seed}: {test_perf}, Seconds/epoch: {time_average_epoch / args.epochs},'
                 f' Max memory allocated: {max_memory_allocated}, Max memory reserved: {max_memory_reserved}')
-            # wandb.log(
-            #     {f'Best Validation in seed {seed}': best_val_perf,
-            #      f'Best Test in seed {seed}': test_perf}
-            # )
             print("=" * 50)
 
             all_validation_acc.append(torch.tensor(validation_perf))

@@ -30,21 +30,20 @@ sweep_config = {
         "batch_norm": {"values": [True]},
         "batch_size": {"values": [32]},
         "dropout": {"values": [0.2, 0.5]},  # if used for c2, use for c3 and others too.
-        "normalization": {"values": ["After"]},
         "k": {"values": [3]},
         # TODO specify for which was 2 and which was 3. pro(3 or 2?) ptc(3) imdbm & b (2) collab (2) mutag (3)
         "sum_or_cat": {"values": ["cat"]},
         "decoder_layers": {"values": [2]},
         "activation": {"values": ["ReLU"]},
-        # "ds_local_layers_comb": {"values": [2]},
-        # "ds_global_layers_comb": {"values": [2]},
+        "ds_local_layers_comb": {"values": [2]},
+        "ds_global_layers_comb": {"values": [2]},
         "ds_local_layers_merge": {"values": [1, 2]},
         "ds_global_layers_merge": {"values": [1, 2]},
         "hidden_dim": {"values": [32]},
         "graph_pooling": {"values": ["sum"]},
     }
 }
-sweep_id = wandb.sweep(sweep_config, project="MUTAG-C3")
+sweep_id = wandb.sweep(sweep_config, project="test")
 
 
 def separate_data(dataset_len, n_splits, seed):
@@ -128,7 +127,7 @@ def diffusion(adj_perturbed, feature_matrix, config, args):
             feature_matrix_for_perturbation = torch.matmul(adj_matrix, feature_matrix_for_perturbation)
             internal_diffusion.append(feature_matrix_for_perturbation.clone())
 
-        if config.sum_or_cat == "sum":
+        if config.sum_or_cat == "sum":  # sum is not used in our model
             internal_diffusion = torch.stack(internal_diffusion, dim=0)
             internal_diffusion = torch.sum(internal_diffusion, dim=0)
         elif config.sum_or_cat == "cat":
@@ -193,116 +192,47 @@ class EnrichedGraphDataset(InMemoryDataset):
             self.data_list = self.process_dataset(dataset, config, args)
             self.data, self.slices = torch.load(self.processed_paths[0])
 
-    # def pad_data(self, feature_matrix, adj):
-    #     num_nodes = feature_matrix.size(0)
-    #
-    #     # Pad feature matrix if necessary
-    #     if num_nodes < self.max_nodes:
-    #         pad_size = self.max_nodes - num_nodes
-    #         feature_matrix = torch.cat([feature_matrix, torch.zeros(pad_size, feature_matrix.size(1))], dim=0)
-    #
-    #     # Pad adjacency if necessary
-    #     if adj.size(0) < self.max_nodes:
-    #         pad_size = self.max_nodes - adj.size(0)
-    #         zeros_pad = torch.zeros(pad_size, adj.size(1))
-    #         adj = torch.cat([adj, zeros_pad], dim=0)
-    #         adj = torch.cat([adj, torch.zeros(adj.size(0), pad_size)], dim=1)
-    #
-    #     return feature_matrix, adj
-
     def process_dataset(self, dataset, config, args):
         torch.manual_seed(args.seed)
         np.random.seed(args.seed)
 
         enriched_dataset = []
-        # final_feature_of_graph = None
-        counter = 0
+        # counter = 0
         for data in dataset:
             edge_index = data.edge_index
             feature_matrix = data.x.clone().float()  # Converted to float for ogb
-            num_nodes = feature_matrix.size(0)
 
             if args.configuration not in ["c1", "c2", "c3", "c4", "sign", "sgcn"]:
                 raise ValueError("Invalid aggregation method specified")
 
-            if config.normalization not in ["Before", "After"]:
-                raise ValueError("Invalid normalization configuration")
+            adj = get_adj(edge_index, set_diag=False, symmetric_normalize=args.configuration in ["sign", "sgcn"])
 
-            if args.configuration == "c3" and config.normalization == "Before":
-                adj = get_adj(edge_index, set_diag=False, symmetric_normalize=True)
-                feature_matrix, adj = self.pad_data(feature_matrix, adj)
-                # if adj.size(0) != feature_matrix.size(0): # for ogb
-                #     counter = counter + 1
-                #     max_size = max(adj.size(0), feature_matrix.size(0))
-                #     pad_amount = max_size - adj.size(0)
-                #     adj = pad(adj, (0, pad_amount, 0, pad_amount), mode='constant', value=0)
-                perturbed_adj = generate_perturbation(adj, self.p, self.num_perturbations, args.seed)
-                feature_matrices_of_perts = diffusion(perturbed_adj, feature_matrix, config, args)
-                final_feature_of_graph = feature_matrices_of_perts.view(-1, feature_matrices_of_perts.size(
-                    -1))  # remove view if wanted to use previous
-
-            elif args.configuration == "c3" or args.configuration == "c4" and config.normalization == "After":
-                adj = get_adj(edge_index, set_diag=False,
-                              symmetric_normalize=False)  # set diag here can be false or true
-                if adj.size(0) != feature_matrix.size(0):  # This is for ogb
-                    counter = counter + 1
+            # Handle padding if needed for OGB datasets
+            if args.dataset in ["ogbg-molhiv", "ogbg-moltox21"]:
+                if adj.size(0) != feature_matrix.size(0):
                     max_size = max(adj.size(0), feature_matrix.size(0))
                     pad_amount = max_size - adj.size(0)
                     adj = pad(adj, (0, pad_amount, 0, pad_amount), mode='constant', value=0)
-                # if num_nodes < self.max_nodes:
-                #     pad_size = self.max_nodes - num_nodes
-                #     feature_matrix = torch.cat([feature_matrix, torch.zeros(pad_size, feature_matrix.size(1))], dim=0)
-                #
-                # if adj.size(0) < self.max_nodes:
-                #     pad_size = self.max_nodes - adj.size(0)
-                #     zeros_pad = torch.zeros(pad_size, adj.size(1))
-                #     adj = torch.cat([adj, zeros_pad], dim=0)
-                #     adj = torch.cat([adj, torch.zeros(adj.size(0), pad_size)], dim=1)
 
-                # feature_matrix, adj = self.pad_data(feature_matrix, adj)
+            if args.configuration in ["c1", "c2", "c3", "c4"]:
                 perturbed_adj = generate_perturbation(adj, self.p, self.num_perturbations, args.seed)
                 normalized_adj = compute_symmetric_normalized_perturbed_adj(perturbed_adj)
                 if torch.isnan(normalized_adj).any():
                     raise ValueError("NaN values encountered in normalized adjacency matrices.")
                 feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config, args)
-                final_feature_of_graph = feature_matrices_of_perts.view(-1, feature_matrices_of_perts.size(-1))
 
-            elif args.configuration == "c2" and config.normalization == "Before":
-                adj = get_adj(edge_index, set_diag=False, symmetric_normalize=True)
-                if adj.size(0) != feature_matrix.size(0):
-                    counter = counter + 1
-                    max_size = max(adj.size(0), feature_matrix.size(0))
-                    pad_amount = max_size - adj.size(0)
-                    adj = pad(adj, (0, pad_amount, 0, pad_amount), mode='constant', value=0)
-                perturbed_adj = generate_perturbation(adj, self.p, self.num_perturbations, args.seed)
-                feature_matrices_of_perts = diffusion(perturbed_adj, feature_matrix, config, args)
-                final_feature_of_graph = feature_matrices_of_perts.mean(dim=0).clone()
-
-            elif args.configuration == "c1" or args.configuration == "c2" and config.normalization == "After":
-                adj = get_adj(edge_index, set_diag=False, symmetric_normalize=False)
-                if adj.size(0) != feature_matrix.size(0):
-                    counter = counter + 1
-                    max_size = max(adj.size(0), feature_matrix.size(0))
-                    pad_amount = max_size - adj.size(0)
-                    adj = pad(adj, (0, pad_amount, 0, pad_amount), mode='constant', value=0)
-                perturbed_adj = generate_perturbation(adj, self.p, self.num_perturbations, args.seed)
-                normalized_adj = compute_symmetric_normalized_perturbed_adj(perturbed_adj)
-                if torch.isnan(normalized_adj).any():
-                    raise ValueError("NaN values encountered in normalized adjacency matrices.")
-                feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config, args)
-                final_feature_of_graph = feature_matrices_of_perts.mean(dim=0).clone()
+                if args.configuration in ["c1", "c2"]:
+                    final_feature_of_graph = feature_matrices_of_perts.mean(dim=0).clone()
+                else:  # for "c3" and "c4"
+                    final_feature_of_graph = feature_matrices_of_perts.view(-1, feature_matrices_of_perts.size(-1))
 
             elif args.configuration == "sign":
-                adj = get_adj(edge_index, set_diag=False, symmetric_normalize=True)
                 adj = adj.unsqueeze(0).expand(1, -1, -1).clone()
-                final_feature_of_graph = diffusion(adj, feature_matrix, config, args)
-                final_feature_of_graph = final_feature_of_graph.squeeze()
+                final_feature_of_graph = diffusion(adj, feature_matrix, config, args).squeeze()
 
             elif args.configuration == "sgcn":
-                adj = get_adj(edge_index, set_diag=False, symmetric_normalize=True)
                 adj = adj.unsqueeze(0).expand(1, -1, -1).clone()
-                final_feature_of_graph = diffusion_sgcn(adj, feature_matrix, config, args.seed)
-                final_feature_of_graph = final_feature_of_graph.squeeze()
+                final_feature_of_graph = diffusion_sgcn(adj, feature_matrix, config, args.seed).squeeze()
 
             else:
                 raise ValueError("Error in choosing hyper parameters")
@@ -310,7 +240,7 @@ class EnrichedGraphDataset(InMemoryDataset):
             enriched_data = Data(x=final_feature_of_graph, edge_index=edge_index, y=data.y)
             enriched_dataset.append(enriched_data)
 
-        print(counter)
+        # print(counter)
         data, slices = self.collate(enriched_dataset)
         path = self.processed_paths[0]
         dir_name = os.path.dirname(path)
@@ -329,197 +259,6 @@ class EnrichedGraphDataset(InMemoryDataset):
     @property
     def processed_file_names(self):
         return ['data.pt']
-
-
-# class DeepSet(nn.Module):
-#     def __init__(self, input_size, hidden_size, num_perturbations):
-#         super(DeepSet, self).__init__()
-#
-#         self.num_perturbations = num_perturbations
-#         # MLP for individual perturbations
-#         self.mlp_perturbation = nn.Sequential(
-#             nn.Linear(input_size, hidden_size),
-#             nn.ELU()
-#         )
-#
-#         # MLP for aggregation
-#         self.mlp_aggregation = nn.Sequential(
-#             nn.Linear(hidden_size, hidden_size),
-#             nn.ELU()
-#         )
-#
-#         self.reset_parameters()
-#
-#     def reset_parameters(self):
-#         for module in self.modules():
-#             if isinstance(module, nn.Linear):
-#                 nn.init.xavier_uniform_(module.weight)
-#                 nn.init.constant_(module.bias, 0)
-#
-#     def forward(self, input_data):
-#         # Apply MLP to each perturbation
-#         # print(input_data.shape)
-#         perturbation_outputs = torch.stack(
-#             [self.mlp_perturbation(input_data[:, i, :]) for i in range(self.num_perturbations)])
-#         # print(perturbation_outputs.shape)
-#         # Sum over perturbations
-#         aggregated_output = torch.sum(perturbation_outputs, dim=0)
-#         # print(aggregated_output.shape)
-#         # Apply MLP to the aggregated output
-#         final_output = self.mlp_aggregation(aggregated_output)
-#         return final_output
-#
-#
-# class SDGNN_DeepSet(nn.Module):
-#     def __init__(self, input_dim, hidden_dim, output_dim, dropout, num_perturbations):
-#         super(SDGNN_DeepSet, self).__init__()
-#
-#         self.deepset_aggregator = DeepSet(input_dim, hidden_dim, num_perturbations)
-#
-#         self.linear1 = nn.Linear(hidden_dim, hidden_dim * 2)
-#         self.bn1 = nn.BatchNorm1d(hidden_dim * 2)
-#         self.activation = nn.ELU()
-#         self.linear2 = nn.Linear(hidden_dim * 2, hidden_dim)
-#         self.bn2 = nn.BatchNorm1d(hidden_dim)
-#         self.linear3 = nn.Linear(hidden_dim, output_dim)
-#         self.dropout = dropout
-#
-#         self.reset_parameters()
-#
-#     def reset_parameters(self):
-#         self.linear1.reset_parameters()
-#         self.linear2.reset_parameters()
-#         self.linear3.reset_parameters()
-#
-#     def forward(self, data):
-#         x = data.x  # [num_perturbation, num_nodes, num_features]
-#         batch = data.batch
-#         # print(f'input: {x.shape}')
-#         aggregated_features = self.deepset_aggregator(x)
-#
-#         x = self.bn1(self.linear1(aggregated_features))
-#         x = self.activation(x)
-#
-#         x = self.bn2(self.linear2(x))
-#         x = self.activation(x)
-#         x = F.dropout(x, p=self.dropout, training=self.training)
-#
-#         x = global_add_pool(x, batch)
-#
-#         x = self.linear3(x)
-#
-#         return F.log_softmax(x, dim=-1)
-
-# this commented now!
-# class DeepSet(nn.Module):
-#     def __init__(self, input_size, hidden_size, num_perturbations, device):
-#         super(DeepSet, self).__init__()
-#
-#         self.hidden_size = hidden_size
-#         # MLP for individual perturbations
-#         self.mlp_local = nn.Sequential(
-#             nn.Linear(input_size, hidden_size),
-#             nn.BatchNorm1d(hidden_size),
-#             nn.ELU(),
-#             nn.Linear(hidden_size, hidden_size),
-#             nn.ELU()
-#         )
-#
-#         # MLP for aggregation
-#         self.mlp_global = nn.Sequential(
-#             nn.Linear(hidden_size, hidden_size),
-#             nn.BatchNorm1d(hidden_size),
-#             nn.ELU(),
-#             nn.Linear(hidden_size, hidden_size),
-#             nn.ELU()
-#         )
-#
-#         self.num_perturbations = num_perturbations
-#         self.device = device
-#
-#     def forward(self, data):
-#         # batch_size = input_data.size(0)
-#
-#         x = self.mlp_local(data.x)
-#         ptr = data.ptr
-#         nodes = (torch.diff(ptr) / self.num_perturbations).to(torch.int16).to(self.device)
-#         idx_list = []
-#         start = 0
-#         for node in nodes:
-#             idx = torch.arange(start, start + node).repeat(self.num_perturbations)
-#             idx_list.append(idx)
-#             start += node
-#         idx_cat = torch.cat(idx_list, dim=0).to(self.device)
-#         aggregated_output = scatter(x, idx_cat, dim=-2, reduce='sum')
-#
-#         # x_transformed = x.view(self.num_perturbations, input_data.size(0) // self.num_perturbations,
-#         # self.hidden_size)  for batch=1
-#
-#         # x_transformed = x.view(batch_size // self.num_perturbations, self.num_perturbations, self.hidden_size)
-#         # x_transformed = x.view(-1, self.num_perturbations, self.max_nodes, self.hidden_size)
-#         # aggregated_output = torch.sum(x_transformed, dim=1)
-#         # aggregated_output = aggregated_output.view(-1, self.hidden_size)
-#         # aggregated_output = torch.sum(x_transformed, dim=0) va in bara batch=1 bod
-#
-#         final_output = self.mlp_global(aggregated_output)
-#
-#         return nodes, final_output
-#
-#
-# class SDGNN_Deepset(nn.Module):
-#     def __init__(self, input_dim, hidden_dim, output_dim, dropout, num_perturbations, device):
-#         super(SDGNN_Deepset, self).__init__()
-#
-#         self.num_perturbations = num_perturbations
-#         self.device = device
-#
-#         self.deepset_aggregator = DeepSet(input_dim, hidden_dim, num_perturbations, device)
-#
-#         self.linear1 = nn.Linear(hidden_dim, hidden_dim)
-#         self.bn1 = nn.BatchNorm1d(hidden_dim)
-#         self.elu = nn.ELU()
-#         self.linear2 = nn.Linear(hidden_dim, hidden_dim // 2)
-#         self.bn2 = nn.BatchNorm1d(hidden_dim // 2)
-#         self.linear3 = nn.Linear(hidden_dim // 2, hidden_dim // 4)
-#         self.bn3 = nn.BatchNorm1d(hidden_dim // 4)
-#         self.linear4 = nn.Linear(hidden_dim // 4, output_dim)
-#         self.dropout = dropout
-#
-#         self.reset_parameters()
-#
-#     def reset_parameters(self):
-#         for m in self.modules():
-#             if isinstance(m, nn.Linear):
-#                 m.reset_parameters()
-#             elif isinstance(m, nn.BatchNorm1d):
-#                 m.reset_parameters()
-#
-#     def forward(self, data):
-#         # x = data.x
-#         # batch = data.batch
-#
-#         nodes, aggregated_features = self.deepset_aggregator(data)
-#         batch_indexing = torch.zeros(aggregated_features.size(0), dtype=torch.long, device=self.device)
-#         start_idx = 0
-#
-#         for idx, boundary in enumerate(nodes):
-#             batch_indexing[start_idx:start_idx + boundary] = idx
-#             start_idx += boundary
-#         # batch = batch.view(-1, self.num_perturbations).to(torch.float).mean(dim=1).long()
-#
-#         x = self.elu(self.bn1(self.linear1(aggregated_features)))
-#
-#         x = self.elu(self.bn2(self.linear2(x)))
-#         x = F.dropout(x, p=self.dropout, training=self.training)
-#
-#         x = global_add_pool(x, batch_indexing)
-#
-#         x = self.elu(self.bn3(self.linear3(x)))
-#         x = F.dropout(x, p=self.dropout, training=self.training)
-#
-#         x = self.linear4(x)
-#
-#         return F.log_softmax(x, dim=-1)
 
 
 class Decoder(nn.Module):  # This is for the decoder of the SDGNN C2, C3 and C4.
@@ -546,9 +285,9 @@ class Decoder(nn.Module):  # This is for the decoder of the SDGNN C2, C3 and C4.
         return self.decoder(x)
 
 
-class SDGNN_C1(nn.Module):
+class SE2P_C1(nn.Module):
     def __init__(self, input_dim, output_dim, config, args):
-        super(SDGNN_C1, self).__init__()
+        super(SE2P_C1, self).__init__()
 
         self.args = args
         self.decoder = Decoder(input_dim, output_dim, config, hidden_factor=4, batch_norm=config.batch_norm)
@@ -576,9 +315,9 @@ class SDGNN_C1(nn.Module):
             return F.log_softmax(x, dim=-1)
 
 
-class SDGNN_C2(nn.Module):
+class SE2P_C2(nn.Module):
     def __init__(self, input_dim, output_dim, config, args):
-        super(SDGNN_C2, self).__init__()
+        super(SE2P_C2, self).__init__()
 
         self.config = config
         self.args = args
@@ -639,9 +378,9 @@ class SDGNN_C2(nn.Module):
             return F.log_softmax(x, dim=-1)
 
 
-class SDGNN_C3(nn.Module):
+class SE2P_C3(nn.Module):
     def __init__(self, input_size, output_size, num_perturbations, device, config, args, mlp_before_sum=True):
-        super(SDGNN_C3, self).__init__()
+        super(SE2P_C3, self).__init__()
 
         self.config = config
         self.args = args
@@ -714,9 +453,9 @@ class SDGNN_C3(nn.Module):
             return F.log_softmax(x, dim=-1)
 
 
-class SDGNN_C4(nn.Module):
+class SE2P_C4(nn.Module):
     def __init__(self, input_size, output_size, num_perturbations, device, config, args, mlp_before_sum=True):
-        super(SDGNN_C4, self).__init__()
+        super(SE2P_C4, self).__init__()
 
         self.k = config.k
         self.args = args
@@ -876,7 +615,6 @@ def main(config=None):
     print(f'Max number of nodes: {max_nodes}')
     print(f'Min number of nodes: {min_nodes}')
     print(f'Number of graphs: {len(dataset)}')
-    # print(f'Number of features: {dataset.num_features}')
     gamma = mean_n
     p = 2 * 1 / (1 + gamma)
     # num_perturbations = round(gamma * np.log10(gamma))
@@ -903,38 +641,27 @@ def main(config=None):
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         # device = torch.device('cpu')
         print(f'Device: {device}')
-        # seeds_to_test = [args.seed]
         n_splits = 10
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(args.seed)
 
-        # final_acc = []
-        # final_std = []
-
-        # for seed in seeds_to_test:
-        # print(f'Seed: {seed}')
-        # print("==============")
-        # torch.manual_seed(seed)
-        # np.random.seed(seed)
-        # generator = torch.Generator()
-        # generator.manual_seed(seed)
         all_validation_accuracies = []
         time_seed = []
 
         skf_splits = separate_data(len(enriched_dataset), n_splits, args.seed)
 
         if args.configuration == "c1":
-            model = SDGNN_C1(enriched_dataset.num_features, enriched_dataset.num_classes, config, args).to(device)
+            model = SE2P_C1(enriched_dataset.num_features, enriched_dataset.num_classes, config, args).to(device)
 
         elif args.configuration == "c2" or args.configuration == "sign" or args.configuration == "sgcn":
-            model = SDGNN_C2(enriched_dataset.num_features, enriched_dataset.num_classes, config, args).to(device)
+            model = SE2P_C2(enriched_dataset.num_features, enriched_dataset.num_classes, config, args).to(device)
 
         elif args.configuration == "c3":
-            model = SDGNN_C3(enriched_dataset.num_features, enriched_dataset.num_classes, num_perturbations, device,
+            model = SE2P_C3(enriched_dataset.num_features, enriched_dataset.num_classes, num_perturbations, device,
                              config, args).to(device)
 
         elif args.configuration == "c4":
-            model = SDGNN_C4(enriched_dataset.num_features, enriched_dataset.num_classes, num_perturbations, device,
+            model = SE2P_C4(enriched_dataset.num_features, enriched_dataset.num_classes, num_perturbations, device,
                              config, args).to(device)
         else:
             raise ValueError("Error in choosing the model.")
@@ -1000,20 +727,11 @@ def main(config=None):
                   f'Max Memory Allocated: {max_memory_allocated} MB | Max Memory Reserved: {max_memory_reserved} MB')
             time_seed.append(elapsed_time_fold)
         print("=" * 30)
-        # average_validation_curve = np.mean(all_validation_accuracies, axis=0)
         average_validation_curve = torch.stack(all_validation_accuracies, dim=0)
         acc_mean = average_validation_curve.mean(dim=0)
         best_epoch = acc_mean.argmax().item()
         best_epoch_mean = average_validation_curve[:, best_epoch].mean()
-        # max_avg_validation_acc_epoch = np.argmax(average_validation_curve)
-        # best_epoch_mean = average_validation_curve[max_avg_validation_acc_epoch]
-        # std_at_max_avg_validation_acc_epoch = np.std(
-        #     [validation_accuracies[max_avg_validation_acc_epoch] for validation_accuracies in
-        #      all_validation_accuracies], ddof=1)
         std_at_max_avg_validation_acc_epoch = average_validation_curve[:, best_epoch].std()
-
-        # final_acc.append(best_epoch_mean)
-        # final_std.append(std_at_max_avg_validation_acc_epoch)
 
         print(f'Epoch {best_epoch + 1} got maximum averaged validation accuracy in seed {args.seed}: '
               f'{best_epoch_mean}')
@@ -1024,10 +742,6 @@ def main(config=None):
         print(f'Average Time/Epoch in seed {args.seed}: {np.mean(time_per_epoch)}')
         print(f'STD Time/Epoch in seed {args.seed}: {np.std(time_per_epoch)}')
 
-        # print("=" * 30)
-        # final_accuracy = np.mean(final_acc)
-        # print(f'Test accuracy for all the seeds: {final_accuracy}')
-        # print(f'Std for all the seeds: {np.mean(final_std)}')
         wandb.log(
             {"Test Accuracy": best_epoch_mean,
              "Std": std_at_max_avg_validation_acc_epoch
