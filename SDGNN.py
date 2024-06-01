@@ -1,6 +1,8 @@
 import torch
+from torch import Tensor
 import os
 from args import Args
+from typing import Any, List, Tuple
 from torch_geometric.loader import DataLoader
 from torch.utils.data import RandomSampler
 import torch.nn as nn
@@ -29,12 +31,12 @@ sweep_config = {
         "num_layers": {"values": [2, 3, 4]},
         "batch_norm": {"values": [True]},
         "batch_size": {"values": [32]},
-        "dropout": {"values": [0.2, 0.5]},  # if used for c2, use for c3 and others too.
+        "dropout": {"values": [0.5]},
         "k": {"values": [3]},
         # TODO specify for which was 2 and which was 3. pro(3 or 2?) ptc(3) imdbm & b (2) collab (2) mutag (3)
-        "sum_or_cat": {"values": ["cat"]},
+        # "sum_or_cat": {"values": ["cat"]},
         "decoder_layers": {"values": [2]},
-        "activation": {"values": ["ReLU"]},
+        "activation": {"values": ["ELU"]},
         "ds_local_layers_comb": {"values": [2]},
         "ds_global_layers_comb": {"values": [2]},
         "ds_local_layers_merge": {"values": [1, 2]},
@@ -43,25 +45,45 @@ sweep_config = {
         "graph_pooling": {"values": ["sum"]},
     }
 }
-sweep_id = wandb.sweep(sweep_config, project="test")
+sweep_id = wandb.sweep(sweep_config, project="PROTEINS-C1")
 
 
-def separate_data(dataset_len, n_splits, seed):
-    # Use same splitting/10-fold as GIN paper
+def separate_data(dataset_len: int, n_splits: int, seed: int) -> List[Tuple[np.ndarray, np.ndarray]]:
+    """
+    Separate dataset indices into stratified folds.
+
+    Parameters:
+    dataset_len (int): Length of the dataset.
+    n_splits (int): Number of splits/folds.
+    seed (int): Random seed for reproducibility.
+
+    Returns:
+    List[Tuple[np.ndarray, np.ndarray]]: List of tuples containing train and test indices for each fold.
+    """
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
     idx_list = []
+
     for idx in skf.split(np.zeros(dataset_len), np.zeros(dataset_len)):
         idx_list.append(idx)
     return idx_list
 
 
-def get_adj(edge_index, set_diag=True, symmetric_normalize=True):
-    # Convert to dense adjacency matrix
+def get_adj(edge_index: Tensor, set_diag: bool = True, symmetric_normalize: bool = True) -> Tensor:
+    """
+    Generate a dense adjacency matrix from edge indices with optional diagonal setting and symmetric normalization.
+
+    Parameters:
+    edge_index (torch.Tensor): Edge indices of the graph.
+    set_diag (bool): If True, set the diagonal to 1. Defaults to True.
+    symmetric_normalize (bool): If True, apply symmetric normalization. Defaults to True.
+
+    Returns:
+    torch.Tensor: Dense adjacency matrix.
+    """
     adj = to_dense_adj(edge_index).squeeze()
 
     if set_diag:
-        identity_matrix = torch.eye(adj.shape[0])
-        adj = adj + identity_matrix
+        adj = adj + torch.eye(adj.size(0), device=adj.device)
     if symmetric_normalize:
         D = torch.diag(adj.sum(dim=1))
         D_inv_sqrt = torch.diag(1.0 / torch.sqrt(D.diagonal()))
@@ -71,29 +93,50 @@ def get_adj(edge_index, set_diag=True, symmetric_normalize=True):
     return adj
 
 
-def generate_perturbation(adj, p, num_perturbations, seed):
+def generate_perturbation(adj: Tensor, p: float, num_perturbations: int, seed: int) -> Tensor:
+    """
+    Generate perturbed adjacency matrices.
+
+    Parameters:
+    adj (torch.Tensor): The original adjacency matrix.
+    p (float): Probability of dropping a node.
+    num_perturbations (int): Number of perturbations to generate.
+    seed (int): Random seed for reproducibility.
+
+    Returns:
+    torch.Tensor: Tensor of perturbed adjacency matrices.
+    """
     torch.manual_seed(seed)
 
     adj = adj.unsqueeze(0).expand(num_perturbations, -1, -1).clone()
     all_adj = [adj[0].clone()]
-    adj_perturbation = adj.clone()  # Make a copy of the original adjacency matrix for this perturbation
 
-    for perturbation in range(1, adj.size(0)):  # Loop over perturbations
-        drop = torch.bernoulli(torch.ones([adj.size(1)], device=adj.device) * p).bool()
+    for perturbation in range(1, num_perturbations):
+        drop_mask = torch.bernoulli(torch.full((adj.size(1),), p, device=adj.device)).bool()
+        adj_perturbation = adj[perturbation].clone()
 
-        for idx, val in enumerate(drop):
-            if val.item() == 1:
-                adj_perturbation[perturbation, idx, :] = 0
-                adj_perturbation[perturbation, :, idx] = 0
+        adj_perturbation[drop_mask, :] = 0
+        adj_perturbation[:, drop_mask] = 0
 
-        all_adj.append(adj_perturbation[perturbation].clone())
+        all_adj.append(adj_perturbation)
 
-    adj_perturbation = torch.stack(all_adj)
+    all_perturbation = torch.stack(all_adj)
 
-    return adj_perturbation
+    return all_perturbation
 
 
-def compute_symmetric_normalized_perturbed_adj(adj_perturbed):  # This is for doing normalization after perturbation
+def compute_symmetric_normalized_perturbed_adj(adj_perturbed: Tensor) -> Tensor:
+    """
+    This function computes the symmetric normalized adjacency matrix for each perturbed adjacency matrix.
+
+    Parameters:
+    adj_perturbed (torch.Tensor): A tensor of perturbed adjacency matrices.
+                                  The shape of the tensor is (num_perturbations, num_nodes, num_nodes).
+
+    Returns:
+    torch.Tensor: A tensor of symmetric normalized adjacency matrices.
+                  The shape of the tensor is the same as the input tensor.
+    """
     normalized_adj = []
     for perturbation in range(adj_perturbed.shape[0]):
         # Compute the degree matrix (D) by summing over rows
@@ -112,9 +155,23 @@ def compute_symmetric_normalized_perturbed_adj(adj_perturbed):  # This is for do
     return all_normalized_adj
 
 
-def diffusion(adj_perturbed, feature_matrix, config, args):
+def diffusion(adj_perturbed: Tensor, feature_matrix: Tensor, config, args) -> Tensor:
+    """
+    Perform feature diffusion on a perturbed adjacency matrix.
+
+    Parameters:
+    adj_perturbed (torch.Tensor): Tensor of perturbed adjacency matrices.
+    feature_matrix (torch.Tensor): Tensor of feature matrices.
+    args (object): Arguments object with 'seed' , 'k', and 'configuration' attributes.
+
+    Returns:
+    torch.Tensor: Tensor of enriched feature matrices after diffusion.
+    """
     torch.manual_seed(args.seed)
     enriched_feature_matrices = []
+
+    cat_dim = 0 if args.configuration == "c4" else 1
+
     for perturbation in range(adj_perturbed.size(0)):
         # Get the adjacency matrix for this perturbation
         adj_matrix = adj_perturbed[perturbation]
@@ -127,13 +184,7 @@ def diffusion(adj_perturbed, feature_matrix, config, args):
             feature_matrix_for_perturbation = torch.matmul(adj_matrix, feature_matrix_for_perturbation)
             internal_diffusion.append(feature_matrix_for_perturbation.clone())
 
-        if config.sum_or_cat == "sum":  # sum is not used in our model
-            internal_diffusion = torch.stack(internal_diffusion, dim=0)
-            internal_diffusion = torch.sum(internal_diffusion, dim=0)
-        elif config.sum_or_cat == "cat":
-            internal_diffusion = torch.cat(internal_diffusion, dim=0 if args.configuration == "c4" else 1)
-        else:
-            raise ValueError("AGG in EQ1 should be either cat or sum")
+        internal_diffusion = torch.cat(internal_diffusion, dim=cat_dim)
 
         enriched_feature_matrices.append(internal_diffusion)
 
@@ -161,19 +212,37 @@ def diffusion_sgcn(adj_perturbed, feature_matrix, config, seed):
     return feature_matrices_of_perturbations
 
 
-def create_mlp(input_size, hidden_size, num_layers, config, use_dropout=False):
+def create_mlp(input_size: int, hidden_size: int, num_layers: int, config: Any, use_dropout: bool = False) -> nn.Sequential:
+    """
+    Create a multi-layer perceptron (MLP) with specified configuration.
+
+    Parameters:
+    input_size (int): Size of the input layer.
+    hidden_size (int): Size of each hidden layer.
+    num_layers (int): Number of hidden layers.
+    config (Any): Configuration object with attributes 'batch_norm', 'activation', and 'dropout'.
+    use_dropout (bool): If True, include dropout layers. Defaults to False.
+
+    Returns:
+    nn.Sequential: Sequential container of the MLP layers.
+    """
     layers = []
     for _ in range(num_layers):
         layers.append(nn.Linear(input_size, hidden_size))
+
         if config.batch_norm:
             layers.append(nn.BatchNorm1d(hidden_size))
+
         if config.activation == 'ELU':
             layers.append(nn.ELU())
         else:
             layers.append(nn.ReLU())
+
         if use_dropout:
             layers.append(nn.Dropout(config.dropout))
+
         input_size = hidden_size
+
     return nn.Sequential(*layers)
 
 
@@ -197,8 +266,11 @@ class EnrichedGraphDataset(InMemoryDataset):
         np.random.seed(args.seed)
 
         enriched_dataset = []
-        # counter = 0
+
+        total_processing_time = 0.0
+
         for data in dataset:
+            start_time = time.time()
             edge_index = data.edge_index
             feature_matrix = data.x.clone().float()  # Converted to float for ogb
 
@@ -221,8 +293,13 @@ class EnrichedGraphDataset(InMemoryDataset):
                     raise ValueError("NaN values encountered in normalized adjacency matrices.")
                 feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config, args)
 
-                if args.configuration in ["c1", "c2"]:
+                if args.configuration == 'c1':
                     final_feature_of_graph = feature_matrices_of_perts.mean(dim=0).clone()
+                    final_feature_of_graph = final_feature_of_graph.sum(dim=0).unsqueeze(0).clone()
+
+                elif args.configuration == 'c2':
+                    final_feature_of_graph = feature_matrices_of_perts.mean(dim=0).clone()
+
                 else:  # for "c3" and "c4"
                     final_feature_of_graph = feature_matrices_of_perts.view(-1, feature_matrices_of_perts.size(-1))
 
@@ -237,10 +314,13 @@ class EnrichedGraphDataset(InMemoryDataset):
             else:
                 raise ValueError("Error in choosing hyper parameters")
 
+            end_time = time.time()
+            total_processing_time += (end_time - start_time)
+
             enriched_data = Data(x=final_feature_of_graph, edge_index=edge_index, y=data.y)
             enriched_dataset.append(enriched_data)
 
-        # print(counter)
+        print(f"Total time taken to process the dataset: {total_processing_time:.2f} seconds")
         data, slices = self.collate(enriched_dataset)
         path = self.processed_paths[0]
         dir_name = os.path.dirname(path)
@@ -261,9 +341,9 @@ class EnrichedGraphDataset(InMemoryDataset):
         return ['data.pt']
 
 
-class Decoder(nn.Module):  # This is for the decoder of the SDGNN C2, C3 and C4.
+class Decoder(nn.Module):
     def __init__(self, input_size, output_size, config, hidden_factor=2, batch_norm=False,
-                 dropout=True):  # collab hidden factor=4, IMDB-M and B=3, PTC=2 and mutag=2, PROTEINS=1 for c1
+                 dropout=True):
         super(Decoder, self).__init__()
 
         hidden_sizes = [input_size // (hidden_factor ** i) for i in range(config.decoder_layers)]
@@ -286,16 +366,12 @@ class Decoder(nn.Module):  # This is for the decoder of the SDGNN C2, C3 and C4.
 
 
 class SE2P_C1(nn.Module):
-    def __init__(self, input_dim, output_dim, config, args):
+    def __init__(self, input_dim: int, output_dim: int, config: Any, args: Any):
         super(SE2P_C1, self).__init__()
 
         self.args = args
-        self.decoder = Decoder(input_dim, output_dim, config, hidden_factor=4, batch_norm=config.batch_norm)
-
-        # self.decoder = MLP(in_channels=input_dim, hidden_channels=hidden_dim, out_channels=output_dim,
-        #                    num_layers=decoder_layers, batch_norm="batch_norm" if config.batch_norm else None,
-        #                    dropout=[dropout] * decoder_layers, activation=config.activation)
-
+        self.decoder = Decoder(input_dim, output_dim, config, hidden_factor=2, batch_norm=config.batch_norm)
+        # collab hidden factor=4, IMDB-M and B=3, PTC=2 and mutag=2, PROTEINS=1 for c1
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -303,9 +379,6 @@ class SE2P_C1(nn.Module):
 
     def forward(self, data):
         x = data.x
-        batch = data.batch
-
-        x = global_add_pool(x, batch)
 
         x = self.decoder(x)
 
@@ -316,7 +389,7 @@ class SE2P_C1(nn.Module):
 
 
 class SE2P_C2(nn.Module):
-    def __init__(self, input_dim, output_dim, config, args):
+    def __init__(self, input_dim: int, output_dim: int, config: Any, args: Any):
         super(SE2P_C2, self).__init__()
 
         self.config = config
@@ -379,7 +452,8 @@ class SE2P_C2(nn.Module):
 
 
 class SE2P_C3(nn.Module):
-    def __init__(self, input_size, output_size, num_perturbations, device, config, args, mlp_before_sum=True):
+    def __init__(self, input_size: int, output_size: int, num_perturbations: int, device, config: Any, args: Any,
+                 mlp_before_sum: bool = True):
         super(SE2P_C3, self).__init__()
 
         self.config = config
@@ -454,7 +528,8 @@ class SE2P_C3(nn.Module):
 
 
 class SE2P_C4(nn.Module):
-    def __init__(self, input_size, output_size, num_perturbations, device, config, args, mlp_before_sum=True):
+    def __init__(self, input_size: int, output_size: int, num_perturbations: int, device, config: Any, args: Any,
+                 mlp_before_sum: bool = True):
         super(SE2P_C4, self).__init__()
 
         self.k = config.k
@@ -597,27 +672,32 @@ def main(config=None):
 
     dataset = get_dataset(args)
     print(dataset)
-    n = []
-    degs = []
-    for g in dataset:
-        num_nodes = g.num_nodes
-        deg = degree(g.edge_index[0], g.num_nodes, dtype=torch.long)
-        n.append(num_nodes)
-        degs.append(deg.max())
-    print(f'Mean Degree: {torch.stack(degs).float().mean()}')
-    print(f'Max Degree: {torch.stack(degs).max()}')
-    print(f'Min Degree: {torch.stack(degs).min()}')
 
-    mean_n = torch.tensor(n).float().mean().round().long().item()
-    max_nodes = torch.tensor(n).float().max().round().long().item()
-    min_nodes = torch.tensor(n).float().min().round().long().item()
-    print(f'Mean number of nodes: {mean_n}')
-    print(f'Max number of nodes: {max_nodes}')
-    print(f'Min number of nodes: {min_nodes}')
+    # Dataset statistics
+    num_nodes_list, degree_list = [], []
+    for graph in dataset:
+        num_nodes = graph.num_nodes
+        max_deg = degree(graph.edge_index[0], num_nodes, dtype=torch.long).max()
+        num_nodes_list.append(num_nodes)
+        degree_list.append(max_deg)
+
+    mean_deg = torch.tensor(degree_list).float().mean()
+    max_deg = torch.tensor(degree_list).max()
+    min_deg = torch.tensor(degree_list).min()
+    print(f'Mean Degree: {mean_deg}')
+    print(f'Max Degree: {max_deg}')
+    print(f'Min Degree: {min_deg}')
+
+    mean_num_nodes = torch.tensor(num_nodes_list).float().mean().round().long().item()
+    max_num_nodes = torch.tensor(num_nodes_list).float().max().round().long().item()
+    min_num_nodes = torch.tensor(num_nodes_list).float().min().round().long().item()
+    print(f'Mean number of nodes: {mean_num_nodes}')
+    print(f'Max number of nodes: {max_num_nodes}')
+    print(f'Min number of nodes: {min_num_nodes}')
     print(f'Number of graphs: {len(dataset)}')
-    gamma = mean_n
-    p = 2 * 1 / (1 + gamma)
-    # num_perturbations = round(gamma * np.log10(gamma))
+
+    gamma = mean_num_nodes
+    p = 2 / (1 + gamma)
     num_perturbations = gamma
     print(f'Number of perturbations: {num_perturbations}')
     print(f'Sampling probability: {p}')
