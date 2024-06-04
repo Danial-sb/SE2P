@@ -28,24 +28,23 @@ sweep_config = {
     "metric": {"name": "test_acc", "goal": "maximize"},
     "parameters": {
         "lr": {"values": [0.01]},
-        "num_layers": {"values": [2, 3, 4]},
+        "num_layers": {"values": [4]},
         "batch_norm": {"values": [True]},
         "batch_size": {"values": [32]},
         "dropout": {"values": [0.5]},
-        "k": {"values": [3]},
+        "k": {"values": [2]},
         # TODO specify for which was 2 and which was 3. pro(3 or 2?) ptc(3) imdbm & b (2) collab (2) mutag (3)
-        # "sum_or_cat": {"values": ["cat"]},
         "decoder_layers": {"values": [2]},
         "activation": {"values": ["ELU"]},
-        "ds_local_layers_comb": {"values": [2]},
-        "ds_global_layers_comb": {"values": [2]},
-        "ds_local_layers_merge": {"values": [1, 2]},
-        "ds_global_layers_merge": {"values": [1, 2]},
+        # "ds_local_layers_comb": {"values": [2]},
+        # "ds_global_layers_comb": {"values": [2]},
+        # "ds_local_layers_merge": {"values": [1]},
+        # "ds_global_layers_merge": {"values": [1]},
         "hidden_dim": {"values": [32]},
         "graph_pooling": {"values": ["sum"]},
     }
 }
-sweep_id = wandb.sweep(sweep_config, project="PROTEINS-C1")
+sweep_id = wandb.sweep(sweep_config, project="IMDBB-C2")
 
 
 def separate_data(dataset_len: int, n_splits: int, seed: int) -> List[Tuple[np.ndarray, np.ndarray]]:
@@ -160,8 +159,8 @@ def diffusion(adj_perturbed: Tensor, feature_matrix: Tensor, config, args) -> Te
     Perform feature diffusion on a perturbed adjacency matrix.
 
     Parameters:
-    adj_perturbed (torch.Tensor): Tensor of perturbed adjacency matrices.
-    feature_matrix (torch.Tensor): Tensor of feature matrices.
+    adj_perturbed (torch.Tensor): Tensor of perturbed adjacency matrices (num_perturbations, n, n).
+    feature_matrix (torch.Tensor): Tensor of feature matrix (n, d).
     args (object): Arguments object with 'seed' , 'k', and 'configuration' attributes.
 
     Returns:
@@ -193,23 +192,25 @@ def diffusion(adj_perturbed: Tensor, feature_matrix: Tensor, config, args) -> Te
     return feature_matrices_of_perturbations
 
 
-def diffusion_sgcn(adj_perturbed, feature_matrix, config, seed):
+def diffusion_sgcn(adj: Tensor, feature_matrix: Tensor, config: Any, seed: int) -> Tensor:
+    """
+    Perform feature diffusion on the adjacency matrix for SGCN (No perturbation and no concatenation).
+
+    Parameters:
+    adj_perturbed (torch.Tensor): Tensor of adjacency matrix (n, n).
+    feature_matrix (torch.Tensor): Tensor of feature matrix. (n, d)
+    args (object): Arguments object with 'seed' , 'k', attributes.
+
+    Returns:
+    torch.Tensor: Tensor of enriched feature matrix after diffusion.
+    """
     torch.manual_seed(seed)
-    enriched_feature_matrices = []
-    for perturbation in range(adj_perturbed.size(0)):
-        # Get the adjacency matrix for this perturbation
-        adj_matrix = adj_perturbed[perturbation]
-        feature_matrix_for_perturbation = feature_matrix.clone()
 
-        # Perform diffusion for 'k' steps
-        for _ in range(config.k):
-            feature_matrix_for_perturbation = torch.matmul(adj_matrix, feature_matrix_for_perturbation)
+    # Perform diffusion for 'k' steps
+    for _ in range(config.k):
+        feature_matrix = torch.matmul(adj, feature_matrix)
 
-        enriched_feature_matrices.append(feature_matrix_for_perturbation)
-
-    feature_matrices_of_perturbations = torch.stack(enriched_feature_matrices)
-
-    return feature_matrices_of_perturbations
+    return feature_matrix
 
 
 def create_mlp(input_size: int, hidden_size: int, num_layers: int, config: Any, use_dropout: bool = False) -> nn.Sequential:
@@ -279,7 +280,7 @@ class EnrichedGraphDataset(InMemoryDataset):
 
             adj = get_adj(edge_index, set_diag=False, symmetric_normalize=args.configuration in ["sign", "sgcn"])
 
-            # Handle padding if needed for OGB datasets
+            # Padding if needed for OGB datasets for handling the isolated nodes
             if args.dataset in ["ogbg-molhiv", "ogbg-moltox21"]:
                 if adj.size(0) != feature_matrix.size(0):
                     max_size = max(adj.size(0), feature_matrix.size(0))
@@ -308,7 +309,6 @@ class EnrichedGraphDataset(InMemoryDataset):
                 final_feature_of_graph = diffusion(adj, feature_matrix, config, args).squeeze()
 
             elif args.configuration == "sgcn":
-                adj = adj.unsqueeze(0).expand(1, -1, -1).clone()
                 final_feature_of_graph = diffusion_sgcn(adj, feature_matrix, config, args.seed).squeeze()
 
             else:
@@ -320,7 +320,8 @@ class EnrichedGraphDataset(InMemoryDataset):
             enriched_data = Data(x=final_feature_of_graph, edge_index=edge_index, y=data.y)
             enriched_dataset.append(enriched_data)
 
-        print(f"Total time taken to process the dataset: {total_processing_time:.2f} seconds")
+        print(f"Time taken to process the dataset: {total_processing_time:.2f} seconds")
+        print("Saving the dataset on the disk ...")
         data, slices = self.collate(enriched_dataset)
         path = self.processed_paths[0]
         dir_name = os.path.dirname(path)
@@ -371,7 +372,7 @@ class SE2P_C1(nn.Module):
 
         self.args = args
         self.decoder = Decoder(input_dim, output_dim, config, hidden_factor=2, batch_norm=config.batch_norm)
-        # collab hidden factor=4, IMDB-M and B=3, PTC=2 and mutag=2, PROTEINS=1 for c1
+        # collab hidden factor=4, IMDB-M and B=3, PTC=2 and mutag=2, PROTEINS=1, ogb=2 for c1
         self.reset_parameters()
 
     def reset_parameters(self):
