@@ -1,26 +1,308 @@
-import numpy as np
 import time
+import random
+import logging
+from typing import Any
+
+import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
 from torch.utils.data import RandomSampler
+
 from torch_geometric.loader import DataLoader
 from torch_geometric.loader.dataloader import Collater
 from torch_geometric.utils import degree
 from torch_geometric.nn import GCNConv, global_add_pool, GINConv
-from sklearn.model_selection import StratifiedKFold, KFold
-import logging
-import random
+
 from test_tube import HyperOptArgumentParser
+
+from SE2P import separate_data, train, test, count_parameters
 from datasets import get_dataset
+
 
 # Code is based on the Dropout Graph Neural Network (DropGNN) paper.
 
 logging.basicConfig(filename='log/test.log', level=logging.INFO, format='%(asctime)s - %(message)s')
 
-def log_and_print(message):
+
+def log_and_print(message, log=False):
     print(message)
-    logging.info(message)
+    if log:
+        logging.info(message)
+
+
+class GCN(nn.Module):
+    def __init__(self, input_dim, output_dim, args: Any):
+        super(GCN, self).__init__()
+
+        hidden_dim = args.hidden_dim
+        self.dropout = args.dropout
+        self.args = args
+
+        self.num_layers = 4
+
+        self.convs = nn.ModuleList()
+        self.bns = nn.ModuleList()
+        self.fcs = nn.ModuleList()
+
+        self.convs.append(GCNConv(input_dim, hidden_dim))
+        self.bns.append(nn.BatchNorm1d(hidden_dim))
+        self.fcs.append(nn.Linear(input_dim, output_dim))
+        self.fcs.append(nn.Linear(hidden_dim, output_dim))
+
+        for i in range(self.num_layers - 1):
+            self.convs.append(GCNConv(hidden_dim, hidden_dim))
+            self.bns.append(nn.BatchNorm1d(hidden_dim))
+            self.fcs.append(nn.Linear(hidden_dim, output_dim))
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                m.reset_parameters()
+            elif isinstance(m, GCNConv):
+                m.reset_parameters()
+            elif isinstance(m, nn.BatchNorm1d):
+                m.reset_parameters()
+
+    def forward(self, data):
+        x = data.x.to(torch.float)
+        edge_index = data.edge_index
+        batch = data.batch
+        outs = [x]
+        for i in range(self.num_layers):
+            x = self.convs[i](x, edge_index)
+            x = self.bns[i](x)
+            x = F.relu(x)
+            outs.append(x)
+
+        out = None
+        for i, x in enumerate(outs):
+            x = global_add_pool(x, batch)
+            x = F.dropout(self.fcs[i](x), p=self.dropout, training=self.training)
+            if out is None:
+                out = x
+            else:
+                out += x
+
+        if self.args.dataset in ['ogbg-moltox21', 'ogbg-molhiv']:
+            return out
+        else:
+            return F.log_softmax(out, dim=-1)
+
+
+class DropGCN(nn.Module):
+    def __init__(self, input_dim, output_dim, num_perturbations, p, args: Any):
+        super(DropGCN, self).__init__()
+
+        dim = args.hidden_dim
+        self.args = args
+        self.dropout = args.dropout
+        self.num_perturbations = num_perturbations
+        self.p = p
+
+        self.num_layers = 4
+
+        self.convs = nn.ModuleList()
+        self.bns = nn.ModuleList()
+        self.fcs = nn.ModuleList()
+
+        self.convs.append(GCNConv(input_dim, dim))
+        self.bns.append(nn.BatchNorm1d(dim))
+        self.fcs.append(nn.Linear(input_dim, output_dim))
+        self.fcs.append(nn.Linear(dim, output_dim))
+
+        for i in range(self.num_layers - 1):
+            self.convs.append(GCNConv(dim, dim))
+            self.bns.append(nn.BatchNorm1d(dim))
+            self.fcs.append(nn.Linear(dim, output_dim))
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                m.reset_parameters()
+            elif isinstance(m, GCNConv):
+                m.reset_parameters()
+            elif isinstance(m, nn.BatchNorm1d):
+                m.reset_parameters()
+
+    def forward(self, data):
+        x = data.x.to(torch.float)
+        edge_index = data.edge_index
+        batch = data.batch
+
+        # Do runs in paralel, by repeating the graphs in the batch
+        x = x.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
+        drop = torch.bernoulli(torch.ones([x.size(0), x.size(1)], device=x.device) * self.p).bool()
+        x[drop] = torch.zeros([drop.sum().long().item(), x.size(-1)], device=x.device)
+        del drop
+        outs = [x]
+        x = x.view(-1, x.size(-1))
+        run_edge_index = edge_index.repeat(1, self.num_perturbations) + torch.arange(self.num_perturbations,
+                                                                                     device=edge_index.device).repeat_interleave(
+            edge_index.size(1)) * (edge_index.max() + 1)
+        for i in range(self.num_layers):
+            x = self.convs[i](x, run_edge_index)
+            x = self.bns[i](x)
+            x = F.relu(x)
+            outs.append(x.view(self.num_perturbations, -1, x.size(-1)))
+        del run_edge_index
+        out = None
+        for i, x in enumerate(outs):
+            x = x.mean(dim=0)
+            x = global_add_pool(x, batch)
+            x = F.dropout(self.fcs[i](x), p=self.dropout, training=self.training)
+            if out is None:
+                out = x
+            else:
+                out += x
+
+        if self.args.dataset in ['ogbg-moltox21', 'ogbg-molhiv']:
+            return out
+        else:
+            return F.log_softmax(out, dim=-1)
+
+
+class GIN(nn.Module):
+    def __init__(self, input_dim, output_dim, args: Any):
+        super(GIN, self).__init__()
+
+        dim = args.hidden_dim
+        self.dropout = args.dropout
+        self.args = args
+
+        self.num_layers = 4
+
+        self.convs = nn.ModuleList()
+        self.bns = nn.ModuleList()
+        self.fcs = nn.ModuleList()
+
+        self.convs.append(GINConv(
+            nn.Sequential(nn.Linear(input_dim, dim), nn.BatchNorm1d(dim), nn.ReLU(), nn.Linear(dim, dim))))
+        self.bns.append(nn.BatchNorm1d(dim))
+        self.fcs.append(nn.Linear(input_dim, output_dim))
+        self.fcs.append(nn.Linear(dim, output_dim))
+
+        for i in range(self.num_layers - 1):
+            self.convs.append(
+                GINConv(nn.Sequential(nn.Linear(dim, dim), nn.BatchNorm1d(dim), nn.ReLU(), nn.Linear(dim, dim))))
+            self.bns.append(nn.BatchNorm1d(dim))
+            self.fcs.append(nn.Linear(dim, output_dim))
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                m.reset_parameters()
+            elif isinstance(m, GINConv):
+                m.reset_parameters()
+            elif isinstance(m, nn.BatchNorm1d):
+                m.reset_parameters()
+
+    def forward(self, data):
+        x = data.x.to(torch.float)
+        edge_index = data.edge_index
+        batch = data.batch
+        outs = [x]
+        for i in range(self.num_layers):
+            x = self.convs[i](x, edge_index)
+            x = self.bns[i](x)
+            x = F.relu(x)
+            outs.append(x)
+
+        out = None
+        for i, x in enumerate(outs):
+            x = global_add_pool(x, batch)
+            x = F.dropout(self.fcs[i](x), p=self.dropout, training=self.training)
+            if out is None:
+                out = x
+            else:
+                out += x
+
+        if self.args.dataset in ['ogbg-moltox21', 'ogbg-molhiv']:
+            return out
+        else:
+            return F.log_softmax(out, dim=-1)
+
+
+class DropGIN(nn.Module):
+    def __init__(self, input_dim, output_dim, num_perturbations, p, args: Any):
+        super(DropGIN, self).__init__()
+
+        dim = args.hidden_dim
+        self.dropout = args.dropout
+        self.num_perturbations = num_perturbations
+        self.p = p
+        self.args =args
+
+        self.num_layers = 4
+
+        self.convs = nn.ModuleList()
+        self.bns = nn.ModuleList()
+        self.fcs = nn.ModuleList()
+
+        self.convs.append(GINConv(
+            nn.Sequential(nn.Linear(input_dim, dim), nn.BatchNorm1d(dim), nn.ReLU(), nn.Linear(dim, dim))))
+        self.bns.append(nn.BatchNorm1d(dim))
+        self.fcs.append(nn.Linear(input_dim, output_dim))
+        self.fcs.append(nn.Linear(dim, output_dim))
+
+        for i in range(self.num_layers - 1):
+            self.convs.append(
+                GINConv(nn.Sequential(nn.Linear(dim, dim), nn.BatchNorm1d(dim), nn.ReLU(), nn.Linear(dim, dim))))
+            self.bns.append(nn.BatchNorm1d(dim))
+            self.fcs.append(nn.Linear(dim, output_dim))
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                m.reset_parameters()
+            elif isinstance(m, GINConv):
+                m.reset_parameters()
+            elif isinstance(m, nn.BatchNorm1d):
+                m.reset_parameters()
+
+    def forward(self, data):
+        x = data.x.to(torch.float)
+        edge_index = data.edge_index
+        batch = data.batch
+
+        # Do runs in paralel, by repeating the graphs in the batch
+        x = x.unsqueeze(0).expand(self.num_perturbations, -1, -1).clone()
+        drop = torch.bernoulli(torch.ones([x.size(0), x.size(1)], device=x.device) * self.p).bool()
+        x[drop] = torch.zeros([drop.sum().long().item(), x.size(-1)], device=x.device)
+        del drop
+        outs = [x]
+        x = x.view(-1, x.size(-1))
+        run_edge_index = edge_index.repeat(1, self.num_perturbations) + torch.arange(self.num_perturbations,
+                                                                                     device=edge_index.device).repeat_interleave(
+            edge_index.size(1)) * (edge_index.max() + 1)
+        for i in range(self.num_layers):
+            x = self.convs[i](x, run_edge_index)
+            x = self.bns[i](x)
+            x = F.relu(x)
+            outs.append(x.view(self.num_perturbations, -1, x.size(-1)))
+        del run_edge_index
+        out = None
+        for i, x in enumerate(outs):
+            x = x.mean(dim=0)
+            x = global_add_pool(x, batch)
+            x = F.dropout(self.fcs[i](x), p=self.dropout, training=self.training)
+            if out is None:
+                out = x
+            else:
+                out += x
+
+        if self.args.dataset in ['ogbg-moltox21', 'ogbg-molhiv']:
+            return out
+        else:
+            return F.log_softmax(out, dim=-1)
+
 
 def main(args):
     print(args, flush=True)
@@ -29,7 +311,6 @@ def main(args):
     n = []
     degs = []
     for g in dataset:
-        num_nodes = g.num_nodes
         deg = degree(g.edge_index[0], g.num_nodes, dtype=torch.long)
         n.append(g.num_nodes)
         degs.append(deg.max())
@@ -46,297 +327,6 @@ def main(args):
     num_runs = gamma
     print(f'Number of runs: {num_runs}')
     print(f'Sampling probability: {p}')
-
-    def separate_data(dataset_len, n_splits, seed=0):
-        # Use same splitting/10-fold as GIN paper
-        skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
-        idx_list = []
-        for idx in skf.split(np.zeros(dataset_len), np.zeros(dataset_len)):
-            idx_list.append(idx)
-        return idx_list
-
-    class GCN(nn.Module):
-        def __init__(self):
-            super(GCN, self).__init__()
-
-            num_features = dataset.num_features
-            hidden_dim = args.hidden_units
-            self.dropout = args.dropout
-
-            self.num_layers = 4
-
-            self.convs = nn.ModuleList()
-            self.bns = nn.ModuleList()
-            self.fcs = nn.ModuleList()
-
-            self.convs.append(GCNConv(num_features, hidden_dim))
-            self.bns.append(nn.BatchNorm1d(hidden_dim))
-            self.fcs.append(nn.Linear(num_features, dataset.num_classes))
-            self.fcs.append(nn.Linear(hidden_dim, dataset.num_classes))
-
-            for i in range(self.num_layers - 1):
-                self.convs.append(GCNConv(hidden_dim, hidden_dim))
-                self.bns.append(nn.BatchNorm1d(hidden_dim))
-                self.fcs.append(nn.Linear(hidden_dim, dataset.num_classes))
-
-            self.reset_parameters()
-
-        def reset_parameters(self):
-            for m in self.modules():
-                if isinstance(m, nn.Linear):
-                    m.reset_parameters()
-                elif isinstance(m, GCNConv):
-                    m.reset_parameters()
-                elif isinstance(m, nn.BatchNorm1d):
-                    m.reset_parameters()
-
-        def forward(self, data):
-            x = data.x
-            edge_index = data.edge_index
-            batch = data.batch
-            outs = [x]
-            for i in range(self.num_layers):
-                x = self.convs[i](x, edge_index)
-                x = self.bns[i](x)
-                x = F.relu(x)
-                outs.append(x)
-
-            out = None
-            for i, x in enumerate(outs):
-                x = global_add_pool(x, batch)
-                x = F.dropout(self.fcs[i](x), p=self.dropout, training=self.training)
-                if out is None:
-                    out = x
-                else:
-                    out += x
-
-            return F.log_softmax(out, dim=-1)
-
-    class DropGCN(nn.Module):
-        def __init__(self):
-            super(DropGCN, self).__init__()
-
-            num_features = dataset.num_features
-            dim = args.hidden_units
-            self.dropout = args.dropout
-
-            self.num_layers = 4
-
-            self.convs = nn.ModuleList()
-            self.bns = nn.ModuleList()
-            self.fcs = nn.ModuleList()
-
-            self.convs.append(GCNConv(num_features, dim))
-            self.bns.append(nn.BatchNorm1d(dim))
-            self.fcs.append(nn.Linear(num_features, dataset.num_classes))
-            self.fcs.append(nn.Linear(dim, dataset.num_classes))
-
-            for i in range(self.num_layers - 1):
-                self.convs.append(GCNConv(dim, dim))
-                self.bns.append(nn.BatchNorm1d(dim))
-                self.fcs.append(nn.Linear(dim, dataset.num_classes))
-            self.reset_parameters()
-
-        def reset_parameters(self):
-            for m in self.modules():
-                if isinstance(m, nn.Linear):
-                    m.reset_parameters()
-                elif isinstance(m, GCNConv):
-                    m.reset_parameters()
-                elif isinstance(m, nn.BatchNorm1d):
-                    m.reset_parameters()
-
-        def forward(self, data):
-            x = data.x
-            edge_index = data.edge_index
-            batch = data.batch
-
-            # Do runs in paralel, by repeating the graphs in the batch
-            x = x.unsqueeze(0).expand(num_runs, -1, -1).clone()
-            drop = torch.bernoulli(torch.ones([x.size(0), x.size(1)], device=x.device) * p).bool()
-            x[drop] = torch.zeros([drop.sum().long().item(), x.size(-1)], device=x.device)
-            del drop
-            outs = [x]
-            x = x.view(-1, x.size(-1))
-            run_edge_index = edge_index.repeat(1, num_runs) + torch.arange(num_runs,
-                                                                           device=edge_index.device).repeat_interleave(
-                edge_index.size(1)) * (edge_index.max() + 1)
-            for i in range(self.num_layers):
-                x = self.convs[i](x, run_edge_index)
-                x = self.bns[i](x)
-                x = F.relu(x)
-                outs.append(x.view(num_runs, -1, x.size(-1)))
-            del run_edge_index
-            out = None
-            for i, x in enumerate(outs):
-                x = x.mean(dim=0)
-                x = global_add_pool(x, batch)
-                x = F.dropout(self.fcs[i](x), p=self.dropout, training=self.training)
-                if out is None:
-                    out = x
-                else:
-                    out += x
-
-            return F.log_softmax(out, dim=-1)
-
-    class GIN(nn.Module):
-        def __init__(self):
-            super(GIN, self).__init__()
-
-            num_features = dataset.num_features
-            dim = args.hidden_units
-            self.dropout = args.dropout
-
-            self.num_layers = 4
-
-            self.convs = nn.ModuleList()
-            self.bns = nn.ModuleList()
-            self.fcs = nn.ModuleList()
-
-            self.convs.append(GINConv(
-                nn.Sequential(nn.Linear(num_features, dim), nn.BatchNorm1d(dim), nn.ReLU(), nn.Linear(dim, dim))))
-            self.bns.append(nn.BatchNorm1d(dim))
-            self.fcs.append(nn.Linear(num_features, dataset.num_classes))
-            self.fcs.append(nn.Linear(dim, dataset.num_classes))
-
-            for i in range(self.num_layers - 1):
-                self.convs.append(
-                    GINConv(nn.Sequential(nn.Linear(dim, dim), nn.BatchNorm1d(dim), nn.ReLU(), nn.Linear(dim, dim))))
-                self.bns.append(nn.BatchNorm1d(dim))
-                self.fcs.append(nn.Linear(dim, dataset.num_classes))
-
-            self.reset_parameters()
-
-        def reset_parameters(self):
-            for m in self.modules():
-                if isinstance(m, nn.Linear):
-                    m.reset_parameters()
-                elif isinstance(m, GINConv):
-                    m.reset_parameters()
-                elif isinstance(m, nn.BatchNorm1d):
-                    m.reset_parameters()
-
-        def forward(self, data):
-            x = data.x
-            edge_index = data.edge_index
-            batch = data.batch
-            outs = [x]
-            for i in range(self.num_layers):
-                x = self.convs[i](x, edge_index)
-                x = self.bns[i](x)
-                x = F.relu(x)
-                outs.append(x)
-
-            out = None
-            for i, x in enumerate(outs):
-                x = global_add_pool(x, batch)
-                x = F.dropout(self.fcs[i](x), p=self.dropout, training=self.training)
-                if out is None:
-                    out = x
-                else:
-                    out += x
-
-            return F.log_softmax(out, dim=-1)
-
-    class DropGIN(nn.Module):
-        def __init__(self):
-            super(DropGIN, self).__init__()
-
-            num_features = dataset.num_features
-            dim = args.hidden_units
-            self.dropout = args.dropout
-
-            self.num_layers = 4
-
-            self.convs = nn.ModuleList()
-            self.bns = nn.ModuleList()
-            self.fcs = nn.ModuleList()
-
-            self.convs.append(GINConv(
-                nn.Sequential(nn.Linear(num_features, dim), nn.BatchNorm1d(dim), nn.ReLU(), nn.Linear(dim, dim))))
-            self.bns.append(nn.BatchNorm1d(dim))
-            self.fcs.append(nn.Linear(num_features, dataset.num_classes))
-            self.fcs.append(nn.Linear(dim, dataset.num_classes))
-
-            for i in range(self.num_layers - 1):
-                self.convs.append(
-                    GINConv(nn.Sequential(nn.Linear(dim, dim), nn.BatchNorm1d(dim), nn.ReLU(), nn.Linear(dim, dim))))
-                self.bns.append(nn.BatchNorm1d(dim))
-                self.fcs.append(nn.Linear(dim, dataset.num_classes))
-
-            self.reset_parameters()
-
-        def reset_parameters(self):
-            for m in self.modules():
-                if isinstance(m, nn.Linear):
-                    m.reset_parameters()
-                elif isinstance(m, GINConv):
-                    m.reset_parameters()
-                elif isinstance(m, nn.BatchNorm1d):
-                    m.reset_parameters()
-
-        def forward(self, data):
-            x = data.x
-            edge_index = data.edge_index
-            batch = data.batch
-
-            # Do runs in paralel, by repeating the graphs in the batch
-            x = x.unsqueeze(0).expand(num_runs, -1, -1).clone()
-            drop = torch.bernoulli(torch.ones([x.size(0), x.size(1)], device=x.device) * p).bool()
-            x[drop] = torch.zeros([drop.sum().long().item(), x.size(-1)], device=x.device)
-            del drop
-            outs = [x]
-            x = x.view(-1, x.size(-1))
-            run_edge_index = edge_index.repeat(1, num_runs) + torch.arange(num_runs,
-                                                                           device=edge_index.device).repeat_interleave(
-                edge_index.size(1)) * (edge_index.max() + 1)
-            for i in range(self.num_layers):
-                x = self.convs[i](x, run_edge_index)
-                x = self.bns[i](x)
-                x = F.relu(x)
-                outs.append(x.view(num_runs, -1, x.size(-1)))
-            del run_edge_index
-            out = None
-            for i, x in enumerate(outs):
-                x = x.mean(dim=0)
-                x = global_add_pool(x, batch)
-                x = F.dropout(self.fcs[i](x), p=self.dropout, training=self.training)
-                if out is None:
-                    out = x
-                else:
-                    out += x
-
-            return F.log_softmax(out, dim=-1)
-
-    def train(model, loader, optimizer, device):
-        model.train()
-        loss_all = 0
-        n = 0
-        for data in loader:
-            data = data.to(device)
-            optimizer.zero_grad()
-            logs = model(data)
-            loss = F.nll_loss(logs, data.y)
-            loss.backward()
-            loss_all += data.num_graphs * loss.item()
-            n += len(data.y)
-            optimizer.step()
-        return loss_all / n
-
-    @torch.no_grad()
-    def test(model, loader, device):
-        model.eval()
-        correct = 0
-        for data in loader:
-            data = data.to(device)
-            out = model(data)
-            pred = out.argmax(dim=1)
-            correct += int((pred == data.y).sum())
-        return correct / len(loader.dataset) * 100
-
-    def count_parameters(model):
-        return sum(p.numel() for p in model.parameters() if p.requires_grad)
-
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     # device = torch.device('cpu')
@@ -356,13 +346,13 @@ def main(args):
     skf_splits = separate_data(len(dataset), n_splits, args.seed)
 
     if args.model == "DropGIN":
-        model = DropGIN().to(device)
+        model = DropGIN(dataset.num_features, dataset.num_classes, num_runs, p, args).to(device)
     elif args.model == "GCN":
-        model = GCN().to(device)
+        model = GCN(dataset.num_features, dataset.num_classes, args).to(device)
     elif args.model == "DropGCN":
-        model = DropGCN().to(device)
+        model = DropGCN(dataset.num_features, dataset.num_classes, num_runs, p, args).to(device)
     else:
-        model = GIN().to(device)
+        model = GIN(dataset.num_features, dataset.num_classes, args).to(device)
 
     # Iterate through each folds
     for fold, (train_indices, test_indices) in enumerate(skf_splits):
@@ -383,7 +373,7 @@ def main(args):
         test_loader = DataLoader(dataset[test_indices.tolist()], batch_size=args.batch_size, shuffle=False)
 
         if fold == 0:
-            log_and_print(f'Model Parameters: {count_parameters(model)}')
+            log_and_print(f'Model learnable parameters for {model.__class__.__name__}: {count_parameters(model)}')
 
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
         scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.5)
@@ -441,11 +431,11 @@ def main(args):
 if __name__ == '__main__':
     parser = HyperOptArgumentParser(strategy='grid_search')
     parser.add_argument('--dataset', type=str, choices=['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES',
-                                                        'PTC_GIN', 'NCI109', 'COLLAB'], default='COLLAB',
+                                                        'PTC_GIN', 'NCI109', 'COLLAB'], default='MUTAG',
                         help="Options are ['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI', 'PROTEINS', 'ENZYMES', 'PTC_GIN']")
     parser.opt_list('--dropout', type=float, default=0.5, tunable=True, options=[0.5])
-    parser.opt_list('--batch_size', type=int, default=12, tunable=True, options=[10])
-    parser.opt_list('--hidden_units', type=int, default=32, tunable=True, options=[32])
+    parser.opt_list('--batch_size', type=int, default=12, tunable=True, options=[32])
+    parser.opt_list('--hidden_dim', type=int, default=32, tunable=True, options=[16])
     parser.add_argument('--seed', type=int, default=0, help='seed for reproducibility')
     parser.add_argument('--lr', type=float, default=0.01, help='learning rate')
     parser.add_argument('--model', type=str, choices=['GIN', 'DropGIN', 'GCN', 'DropGCN'], default="DropGCN")

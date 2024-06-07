@@ -1,50 +1,31 @@
-import torch
-from torch import Tensor
 import os
-from args import Args
+import random
+import time
 from typing import Any, List, Tuple
-from torch_geometric.loader import DataLoader
-from torch.utils.data import RandomSampler
+
+import numpy as np
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import random
-import numpy as np
-from torch_geometric.nn import global_add_pool
-from torch_geometric.utils import to_dense_adj
-from torch_scatter import scatter
-from torch_geometric.utils import degree
+from torch import Tensor
+from torch.utils.data import RandomSampler
 from torch.nn.functional import pad
+
 from sklearn.model_selection import StratifiedKFold
+
+from torch_geometric.loader import DataLoader
 from torch_geometric.loader.dataloader import Collater
-import time
 from torch_geometric.data import Data, InMemoryDataset
-import wandb
+from torch_geometric.nn import global_add_pool
 from torch_geometric.nn.aggr import AttentionalAggregation
+from torch_geometric.utils import degree, to_dense_adj
 from torch_geometric.nn.inits import reset
+
+from torch_scatter import scatter
+
+from args import Args
 from datasets import get_dataset
 
-sweep_config = {
-    "method": "grid",
-    "metric": {"name": "test_acc", "goal": "maximize"},
-    "parameters": {
-        "lr": {"values": [0.01]},
-        "num_layers": {"values": [4]},
-        "batch_norm": {"values": [True]},
-        "batch_size": {"values": [32]},
-        "dropout": {"values": [0.5]},
-        "k": {"values": [2]},
-        # TODO specify for which was 2 and which was 3. pro(3 or 2?) ptc(3) imdbm & b (2) collab (2) mutag (3)
-        "decoder_layers": {"values": [2]},
-        "activation": {"values": ["ELU"]},
-        # "ds_local_layers_comb": {"values": [2]},
-        # "ds_global_layers_comb": {"values": [2]},
-        # "ds_local_layers_merge": {"values": [1]},
-        # "ds_global_layers_merge": {"values": [1]},
-        "hidden_dim": {"values": [32]},
-        "graph_pooling": {"values": ["sum"]},
-    }
-}
-sweep_id = wandb.sweep(sweep_config, project="IMDBB-C2")
 
 
 def separate_data(dataset_len: int, n_splits: int, seed: int) -> List[Tuple[np.ndarray, np.ndarray]]:
@@ -154,7 +135,7 @@ def compute_symmetric_normalized_perturbed_adj(adj_perturbed: Tensor) -> Tensor:
     return all_normalized_adj
 
 
-def diffusion(adj_perturbed: Tensor, feature_matrix: Tensor, config, args) -> Tensor:
+def diffusion(adj_perturbed: Tensor, feature_matrix: Tensor, args: Any) -> Tensor:
     """
     Perform feature diffusion on a perturbed adjacency matrix.
 
@@ -177,8 +158,8 @@ def diffusion(adj_perturbed: Tensor, feature_matrix: Tensor, config, args) -> Te
         feature_matrix_for_perturbation = feature_matrix.clone()
 
         internal_diffusion = [feature_matrix_for_perturbation.clone()]
-        # Perform diffusion for 'k' steps
-        for _ in range(config.k):
+        # Perform diffusion for 'L' steps
+        for _ in range(args.L):
             # Multiply the adjacency matrix with the perturbed feature matrix for each step
             feature_matrix_for_perturbation = torch.matmul(adj_matrix, feature_matrix_for_perturbation)
             internal_diffusion.append(feature_matrix_for_perturbation.clone())
@@ -192,7 +173,7 @@ def diffusion(adj_perturbed: Tensor, feature_matrix: Tensor, config, args) -> Te
     return feature_matrices_of_perturbations
 
 
-def diffusion_sgcn(adj: Tensor, feature_matrix: Tensor, config: Any, seed: int) -> Tensor:
+def diffusion_sgcn(adj: Tensor, feature_matrix: Tensor, args: Any) -> Tensor:
     """
     Perform feature diffusion on the adjacency matrix for SGCN (No perturbation and no concatenation).
 
@@ -204,16 +185,17 @@ def diffusion_sgcn(adj: Tensor, feature_matrix: Tensor, config: Any, seed: int) 
     Returns:
     torch.Tensor: Tensor of enriched feature matrix after diffusion.
     """
-    torch.manual_seed(seed)
+    torch.manual_seed(args.seed)
 
-    # Perform diffusion for 'k' steps
-    for _ in range(config.k):
+    # Perform diffusion for 'L' steps
+    for _ in range(args.L):
         feature_matrix = torch.matmul(adj, feature_matrix)
 
     return feature_matrix
 
 
-def create_mlp(input_size: int, hidden_size: int, num_layers: int, config: Any, use_dropout: bool = False) -> nn.Sequential:
+def create_mlp(input_size: int, hidden_size: int, num_layers: int, args: Any,
+               use_dropout: bool = False) -> nn.Sequential:
     """
     Create a multi-layer perceptron (MLP) with specified configuration.
 
@@ -221,7 +203,7 @@ def create_mlp(input_size: int, hidden_size: int, num_layers: int, config: Any, 
     input_size (int): Size of the input layer.
     hidden_size (int): Size of each hidden layer.
     num_layers (int): Number of hidden layers.
-    config (Any): Configuration object with attributes 'batch_norm', 'activation', and 'dropout'.
+    args (Any): args object with attributes 'batch_norm', 'activation', and 'dropout'.
     use_dropout (bool): If True, include dropout layers. Defaults to False.
 
     Returns:
@@ -231,16 +213,16 @@ def create_mlp(input_size: int, hidden_size: int, num_layers: int, config: Any, 
     for _ in range(num_layers):
         layers.append(nn.Linear(input_size, hidden_size))
 
-        if config.batch_norm:
+        if args.batch_norm:
             layers.append(nn.BatchNorm1d(hidden_size))
 
-        if config.activation == 'ELU':
+        if args.activation == 'ELU':
             layers.append(nn.ELU())
         else:
             layers.append(nn.ReLU())
 
         if use_dropout:
-            layers.append(nn.Dropout(config.dropout))
+            layers.append(nn.Dropout(args.dropout))
 
         input_size = hidden_size
 
@@ -248,7 +230,7 @@ def create_mlp(input_size: int, hidden_size: int, num_layers: int, config: Any, 
 
 
 class EnrichedGraphDataset(InMemoryDataset):
-    def __init__(self, root, name, dataset, p, num_perturbations, config, args):
+    def __init__(self, root, name, dataset, p, num_perturbations, args):
         super(EnrichedGraphDataset, self).__init__(root, transform=None, pre_transform=None)
         self.name = name
         self.p = p
@@ -259,10 +241,10 @@ class EnrichedGraphDataset(InMemoryDataset):
             self.data, self.slices = torch.load(self.processed_paths[0])
         else:
             print("Preprocessing ...")
-            self.data_list = self.process_dataset(dataset, config, args)
+            self.data_list = self.process_dataset(dataset, args)
             self.data, self.slices = torch.load(self.processed_paths[0])
 
-    def process_dataset(self, dataset, config, args):
+    def process_dataset(self, dataset, args):
         torch.manual_seed(args.seed)
         np.random.seed(args.seed)
 
@@ -292,7 +274,7 @@ class EnrichedGraphDataset(InMemoryDataset):
                 normalized_adj = compute_symmetric_normalized_perturbed_adj(perturbed_adj)
                 if torch.isnan(normalized_adj).any():
                     raise ValueError("NaN values encountered in normalized adjacency matrices.")
-                feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, config, args)
+                feature_matrices_of_perts = diffusion(normalized_adj, feature_matrix, args)
 
                 if args.configuration == 'c1':
                     final_feature_of_graph = feature_matrices_of_perts.mean(dim=0).clone()
@@ -306,10 +288,10 @@ class EnrichedGraphDataset(InMemoryDataset):
 
             elif args.configuration == "sign":
                 adj = adj.unsqueeze(0).expand(1, -1, -1).clone()
-                final_feature_of_graph = diffusion(adj, feature_matrix, config, args).squeeze()
+                final_feature_of_graph = diffusion(adj, feature_matrix, args).squeeze()
 
             elif args.configuration == "sgcn":
-                final_feature_of_graph = diffusion_sgcn(adj, feature_matrix, config, args.seed).squeeze()
+                final_feature_of_graph = diffusion_sgcn(adj, feature_matrix, args).squeeze()
 
             else:
                 raise ValueError("Error in choosing hyper parameters")
@@ -343,22 +325,22 @@ class EnrichedGraphDataset(InMemoryDataset):
 
 
 class Decoder(nn.Module):
-    def __init__(self, input_size, output_size, config, hidden_factor=2, batch_norm=False,
+    def __init__(self, input_size, output_size, args: Any, hidden_factor=2, batch_norm=False,
                  dropout=True):
         super(Decoder, self).__init__()
 
-        hidden_sizes = [input_size // (hidden_factor ** i) for i in range(config.decoder_layers)]
+        hidden_sizes = [input_size // (hidden_factor ** i) for i in range(args.N_mlp)]
         layers = []
-        for i in range(config.decoder_layers - 1):
+        for i in range(args.N_mlp - 1):
             layers.append(nn.Linear(hidden_sizes[i], hidden_sizes[i + 1]))
             if batch_norm:
                 layers.append(nn.BatchNorm1d(hidden_sizes[i + 1]))
-            if config.activation == 'ELU':
+            if args.activation == 'ELU':
                 layers.append(nn.ELU())
             else:
                 layers.append(nn.ReLU())
             if dropout:
-                layers.append(nn.Dropout(config.dropout))
+                layers.append(nn.Dropout(args.dropout))
         layers.append(nn.Linear(hidden_sizes[-1], output_size))
         self.decoder = nn.Sequential(*layers)
 
@@ -367,11 +349,11 @@ class Decoder(nn.Module):
 
 
 class SE2P_C1(nn.Module):
-    def __init__(self, input_dim: int, output_dim: int, config: Any, args: Any):
+    def __init__(self, input_dim: int, output_dim: int, args: Any):
         super(SE2P_C1, self).__init__()
 
         self.args = args
-        self.decoder = Decoder(input_dim, output_dim, config, hidden_factor=2, batch_norm=config.batch_norm)
+        self.decoder = Decoder(input_dim, output_dim, args, hidden_factor=2, batch_norm=args.batch_norm)
         # collab hidden factor=4, IMDB-M and B=3, PTC=2 and mutag=2, PROTEINS=1, ogb=2 for c1
         self.reset_parameters()
 
@@ -390,37 +372,36 @@ class SE2P_C1(nn.Module):
 
 
 class SE2P_C2(nn.Module):
-    def __init__(self, input_dim: int, output_dim: int, config: Any, args: Any):
+    def __init__(self, input_dim: int, output_dim: int, args: Any):
         super(SE2P_C2, self).__init__()
 
-        self.config = config
         self.args = args
 
         self.linears = nn.ModuleList([
-            nn.Linear(input_dim if i == 0 else config.hidden_dim, config.hidden_dim)
-            for i in range(config.num_layers)
+            nn.Linear(input_dim if i == 0 else args.hidden_dim, args.hidden_dim)
+            for i in range(args.N_pool)
         ])
 
-        if config.batch_norm:
+        if args.batch_norm:
             self.bns = nn.ModuleList([
-                nn.BatchNorm1d(config.hidden_dim)
-                for _ in range(config.num_layers)
+                nn.BatchNorm1d(args.hidden_dim)
+                for _ in range(args.N_pool)
             ])
 
-        if config.activation == 'ELU':
+        if args.activation == 'ELU':
             self.activation = nn.ELU()
         else:
             self.activation = nn.ReLU()
 
-        if config.graph_pooling == 'sum':
+        if args.graph_pooling == 'sum':
             self.pool = global_add_pool
-        elif self.config.graph_pooling == 'attention_agg':
+        elif args.graph_pooling == 'attention_agg':
             self.pool = AttentionalAggregation(
-                gate_nn=torch.nn.Sequential(torch.nn.Linear(config.hidden_dim, 2 * config.hidden_dim),
-                                            torch.nn.BatchNorm1d(2 * config.hidden_dim), torch.nn.ReLU(),
-                                            torch.nn.Linear(2 * config.hidden_dim, 1)))
+                gate_nn=torch.nn.Sequential(torch.nn.Linear(args.hidden_dim, 2 * args.hidden_dim),
+                                            torch.nn.BatchNorm1d(2 * args.hidden_dim), torch.nn.ReLU(),
+                                            torch.nn.Linear(2 * args.hidden_dim, 1)))
 
-        self.decoder = Decoder(config.hidden_dim, output_dim, config)
+        self.decoder = Decoder(args.hidden_dim, output_dim, args)
 
         self.reset_parameters()
 
@@ -435,12 +416,12 @@ class SE2P_C2(nn.Module):
         x = data.x
         batch = data.batch
 
-        for i in range(self.config.num_layers):
+        for i in range(self.args.N_pool):
             x = self.linears[i](x)
-            if self.config.batch_norm:
+            if self.args.batch_norm:
                 x = self.bns[i](x)
             x = self.activation(x)
-            x = F.dropout(x, p=self.config.dropout, training=self.training)
+            x = F.dropout(x, p=self.args.dropout, training=self.training)
 
         x = self.pool(x, batch)
 
@@ -453,32 +434,31 @@ class SE2P_C2(nn.Module):
 
 
 class SE2P_C3(nn.Module):
-    def __init__(self, input_size: int, output_size: int, num_perturbations: int, device, config: Any, args: Any,
+    def __init__(self, input_size: int, output_size: int, num_perturbations: int, device, args: Any,
                  mlp_before_sum: bool = True):
         super(SE2P_C3, self).__init__()
 
-        self.config = config
         self.args = args
         self.mlp_before_sum = mlp_before_sum
         # MLP for individual perturbations
-        self.mlp_local = create_mlp(input_size, config.hidden_dim, config.ds_local_layers_merge, config)
+        self.mlp_local = create_mlp(input_size, args.hidden_dim, args.Ds_im, args)
 
         # MLP for aggregation
-        self.mlp_global = create_mlp(config.hidden_dim, config.hidden_dim, config.ds_global_layers_merge, config)
+        self.mlp_global = create_mlp(args.hidden_dim, args.hidden_dim, args.Ds_om, args)
 
         if mlp_before_sum:
-            self.mlp_before_sum = create_mlp(config.hidden_dim, config.hidden_dim, config.num_layers, config,
+            self.mlp_before_sum = create_mlp(args.hidden_dim, args.hidden_dim, args.N_pool, args,
                                              use_dropout=True)
 
-        if self.config.graph_pooling == 'sum':
+        if self.args.graph_pooling == 'sum':
             self.pool = global_add_pool
-        elif self.config.graph_pooling == 'attention_agg':
+        elif self.args.graph_pooling == 'attention_agg':
             self.pool = AttentionalAggregation(
-                gate_nn=torch.nn.Sequential(torch.nn.Linear(config.hidden_dim, 2 * config.hidden_dim),
-                                            torch.nn.BatchNorm1d(2 * config.hidden_dim), torch.nn.ReLU(),
-                                            torch.nn.Linear(2 * config.hidden_dim, 1)))
+                gate_nn=torch.nn.Sequential(torch.nn.Linear(args.hidden_dim, 2 * args.hidden_dim),
+                                            torch.nn.BatchNorm1d(2 * args.hidden_dim), torch.nn.ReLU(),
+                                            torch.nn.Linear(2 * args.hidden_dim, 1)))
 
-        self.decoder = Decoder(config.hidden_dim, output_size, config)
+        self.decoder = Decoder(args.hidden_dim, output_size, args)
 
         self.num_perturbations = num_perturbations
         self.device = device
@@ -529,38 +509,36 @@ class SE2P_C3(nn.Module):
 
 
 class SE2P_C4(nn.Module):
-    def __init__(self, input_size: int, output_size: int, num_perturbations: int, device, config: Any, args: Any,
+    def __init__(self, input_size: int, output_size: int, num_perturbations: int, device, args: Any,
                  mlp_before_sum: bool = True):
         super(SE2P_C4, self).__init__()
 
-        self.k = config.k
+        self.L = args.L
         self.args = args
         self.num_perturbations = num_perturbations
         self.device = device
 
-        self.mlp_local_combine = create_mlp(input_size, config.hidden_dim, config.ds_local_layers_comb, config)
+        self.mlp_local_combine = create_mlp(input_size, args.hidden_dim, args.Ds_ic, args)
 
-        self.mlp_global_combine = create_mlp(config.hidden_dim, config.hidden_dim, config.ds_global_layers_comb,
-                                             config)
+        self.mlp_global_combine = create_mlp(args.hidden_dim, args.hidden_dim, args.Ds_oc, args)
 
-        self.mlp_local_merge = create_mlp(config.hidden_dim, config.hidden_dim, config.ds_local_layers_merge, config)
+        self.mlp_local_merge = create_mlp(args.hidden_dim, args.hidden_dim, args.Ds_im, args)
 
-        self.mlp_global_merge = create_mlp(config.hidden_dim, config.hidden_dim, config.ds_global_layers_merge,
-                                           config)
+        self.mlp_global_merge = create_mlp(args.hidden_dim, args.hidden_dim, args.Ds_om, args)
 
         if mlp_before_sum:
-            self.mlp_before_sum = create_mlp(config.hidden_dim, config.hidden_dim, config.num_layers, config,
+            self.mlp_before_sum = create_mlp(args.hidden_dim, args.hidden_dim, args.N_pool, args,
                                              use_dropout=True)
 
-        if config.graph_pooling == 'sum':
+        if args.graph_pooling == 'sum':
             self.pool = global_add_pool
-        elif config.graph_pooling == 'attention_agg':
+        elif args.graph_pooling == 'attention_agg':
             self.pool = AttentionalAggregation(
-                gate_nn=torch.nn.Sequential(torch.nn.Linear(config.hidden_dim, 2 * config.hidden_dim),
-                                            torch.nn.BatchNorm1d(2 * config.hidden_dim), torch.nn.ReLU(),
-                                            torch.nn.Linear(2 * config.hidden_dim, 1)))
+                gate_nn=torch.nn.Sequential(torch.nn.Linear(args.hidden_dim, 2 * args.hidden_dim),
+                                            torch.nn.BatchNorm1d(2 * args.hidden_dim), torch.nn.ReLU(),
+                                            torch.nn.Linear(2 * args.hidden_dim, 1)))
 
-        self.decoder = Decoder(config.hidden_dim, output_size, config)
+        self.decoder = Decoder(args.hidden_dim, output_size, args)
 
         self.reset_parameters()
 
@@ -574,14 +552,14 @@ class SE2P_C4(nn.Module):
     def forward(self, data):
 
         ptr = data.ptr
-        nodes = (torch.diff(ptr) / (self.num_perturbations * (self.k + 1))).to(torch.long).to(self.device)
+        nodes = (torch.diff(ptr) / (self.num_perturbations * (self.L + 1))).to(torch.long).to(self.device)
 
         start_comb = 0
         idx_list_all = []
         for node in nodes:
             idx_list_comb = []
             for i in range(self.num_perturbations):
-                idx_comb = torch.arange(start_comb, start_comb + node).repeat(self.k + 1)
+                idx_comb = torch.arange(start_comb, start_comb + node).repeat(self.L + 1)
                 idx_list_comb.append(idx_comb)
                 start_comb += node
 
@@ -671,6 +649,8 @@ def main(config=None):
     generator = torch.Generator()
     generator.manual_seed(args.seed)
 
+    if args.dataset in ['ogbg-molhiv', 'ogbg-moltox21']:
+        raise ValueError("Invalid dataset")
     dataset = get_dataset(args)
     print(dataset)
 
@@ -705,129 +685,119 @@ def main(config=None):
     print(f'Number of features: {dataset.num_features}')
     current_path = os.getcwd()
 
-    wandb.login()
-    with wandb.init(config=config):
-        config = wandb.config
-        # print(args)
-        name = f"enriched_{args.dataset}_{args.configuration}"
-        start_time = time.time()
-        enriched_dataset = EnrichedGraphDataset(os.path.join(current_path, 'enriched_dataset'), name, dataset, p=p,
-                                                num_perturbations=num_perturbations, config=config, args=args)
+    name = f"enriched_{args.dataset}_{args.configuration}"
+    start_time = time.time()
+    enriched_dataset = EnrichedGraphDataset(os.path.join(current_path, 'enriched_dataset'), name, dataset, p=p,
+                                            num_perturbations=num_perturbations, args=args)
 
-        end_time = time.time()
-        elapsed_time = end_time - start_time
-        print(f"Done! Time taken: {elapsed_time:.2f} seconds")
-        print(f'Number of enriched features: {enriched_dataset.num_features}')
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+    print(f"Done! Time taken: {elapsed_time:.2f} seconds")
+    print(f'Number of enriched features: {enriched_dataset.num_features}')
 
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        # device = torch.device('cpu')
-        print(f'Device: {device}')
-        n_splits = 10
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(args.seed)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # device = torch.device('cpu')
+    print(f'Device: {device}')
+    n_splits = 10
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
 
-        all_validation_accuracies = []
-        time_seed = []
+    all_validation_accuracies = []
+    time_seed = []
 
-        skf_splits = separate_data(len(enriched_dataset), n_splits, args.seed)
+    skf_splits = separate_data(len(enriched_dataset), n_splits, args.seed)
 
-        if args.configuration == "c1":
-            model = SE2P_C1(enriched_dataset.num_features, enriched_dataset.num_classes, config, args).to(device)
+    if args.configuration == "c1":
+        model = SE2P_C1(enriched_dataset.num_features, enriched_dataset.num_classes, args).to(device)
 
-        elif args.configuration == "c2" or args.configuration == "sign" or args.configuration == "sgcn":
-            model = SE2P_C2(enriched_dataset.num_features, enriched_dataset.num_classes, config, args).to(device)
+    elif args.configuration == "c2" or args.configuration == "sign" or args.configuration == "sgcn":
+        model = SE2P_C2(enriched_dataset.num_features, enriched_dataset.num_classes, args).to(device)
 
-        elif args.configuration == "c3":
-            model = SE2P_C3(enriched_dataset.num_features, enriched_dataset.num_classes, num_perturbations, device,
-                             config, args).to(device)
+    elif args.configuration == "c3":
+        model = SE2P_C3(enriched_dataset.num_features, enriched_dataset.num_classes, num_perturbations, device,
+                        args).to(device)
 
-        elif args.configuration == "c4":
-            model = SE2P_C4(enriched_dataset.num_features, enriched_dataset.num_classes, num_perturbations, device,
-                             config, args).to(device)
-        else:
-            raise ValueError("Error in choosing the model.")
+    elif args.configuration == "c4":
+        model = SE2P_C4(enriched_dataset.num_features, enriched_dataset.num_classes, num_perturbations, device,
+                        args).to(device)
+    else:
+        raise ValueError("Error in choosing the model.")
 
-        # Iterate through each fold
-        for fold, (train_indices, test_indices) in enumerate(skf_splits):
-            model.reset_parameters()
-            print(f'Fold {fold + 1}/{n_splits}:')
-            start_time_fold = time.time()
-            # Create data loaders for the current fold
-            train_loader = DataLoader(
-                enriched_dataset[train_indices.tolist()],
-                sampler=RandomSampler(dataset[train_indices.tolist()], replacement=True,
-                                      num_samples=int(
-                                          len(train_indices.tolist()) * 50 / (
-                                                  len(train_indices.tolist()) / config.batch_size)),
-                                      generator=generator),
-                batch_size=config.batch_size, drop_last=False,
-                collate_fn=Collater(follow_batch=[], exclude_keys=[]))
+    # Iterate through each fold
+    for fold, (train_indices, test_indices) in enumerate(skf_splits):
+        model.reset_parameters()
+        print(f'Fold {fold + 1}/{n_splits}:')
+        start_time_fold = time.time()
+        # Create data loaders for the current fold
+        train_loader = DataLoader(
+            enriched_dataset[train_indices.tolist()],
+            sampler=RandomSampler(dataset[train_indices.tolist()], replacement=True,
+                                  num_samples=int(
+                                      len(train_indices.tolist()) * 50 / (
+                                              len(train_indices.tolist()) / args.batch_size)),
+                                  generator=generator),
+            batch_size=args.batch_size, drop_last=False,
+            collate_fn=Collater(follow_batch=[], exclude_keys=[]))
 
-            test_loader = DataLoader(enriched_dataset[test_indices.tolist()], batch_size=config.batch_size,
-                                     shuffle=False)
+        test_loader = DataLoader(enriched_dataset[test_indices.tolist()], batch_size=args.batch_size,
+                                 shuffle=False)
 
-            if fold == 0:
-                print(f'Model learnable parameters: {count_parameters(model)}')
-            optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
-            scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.5)
+        if fold == 0:
+            print(f'Model learnable parameters for {model.__class__.__name__}: {count_parameters(model)}')
+        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.5)
 
-            time_per_epoch = []
-            max_memory_allocated = 0
-            max_memory_reserved = 0
-            validation_accuracies = []
-            # Training loop for the current fold
-            for epoch in range(1, args.epochs + 1):
-                start_time_epoch = time.time()
-                lr = scheduler.optimizer.param_groups[0]['lr']
-                train_loss = train(model, train_loader, optimizer, device)
-                scheduler.step()
+        time_per_epoch = []
+        max_memory_allocated = 0
+        max_memory_reserved = 0
+        validation_accuracies = []
+        # Training loop for the current fold
+        for epoch in range(1, args.epochs + 1):
+            start_time_epoch = time.time()
+            lr = scheduler.optimizer.param_groups[0]['lr']
+            train_loss = train(model, train_loader, optimizer, device)
+            scheduler.step()
 
-                memory_allocated = torch.cuda.max_memory_allocated(device) // (1024 ** 2)
-                memory_reserved = torch.cuda.max_memory_reserved(device) // (1024 ** 2)
-                max_memory_allocated = max(max_memory_allocated, memory_allocated)
-                max_memory_reserved = max(max_memory_reserved, memory_reserved)
+            memory_allocated = torch.cuda.max_memory_allocated(device) // (1024 ** 2)
+            memory_reserved = torch.cuda.max_memory_reserved(device) // (1024 ** 2)
+            max_memory_allocated = max(max_memory_allocated, memory_allocated)
+            max_memory_reserved = max(max_memory_reserved, memory_reserved)
 
-                test_acc = test(model, test_loader, device)
-                end_time_epoch = time.time()
-                elapsed_time_epoch = end_time_epoch - start_time_epoch
-                time_per_epoch.append(elapsed_time_epoch)
-                if epoch % 25 == 0 or epoch == 1:
-                    print(f'Epoch: {epoch:02d} | TrainLoss: {train_loss:.3f} | Test_acc: {test_acc:.3f} | Time'
-                          f'/epoch: {elapsed_time_epoch:.2f} | Memory Allocated: {memory_allocated} MB | Memory '
-                          f'Reserved: {memory_reserved} MB | LR: {lr:.6f}')
-                wandb.log({"test acc": test_acc})
-                validation_accuracies.append(test_acc)
+            test_acc = test(model, test_loader, device)
+            end_time_epoch = time.time()
+            elapsed_time_epoch = end_time_epoch - start_time_epoch
+            time_per_epoch.append(elapsed_time_epoch)
+            if epoch % 25 == 0 or epoch == 1:
+                print(f'Epoch: {epoch:02d} | TrainLoss: {train_loss:.3f} | Test_acc: {test_acc:.3f} | Time'
+                      f'/epoch: {elapsed_time_epoch:.2f} | Memory Allocated: {memory_allocated} MB | Memory '
+                      f'Reserved: {memory_reserved} MB | LR: {lr:.6f}')
+            validation_accuracies.append(test_acc)
 
-            print(f'Average time per epoch in fold {fold + 1} and seed {args.seed}: {np.mean(time_per_epoch)}')
-            print(f'Std time per epoch in fold {fold + 1} and seed {args.seed}: {np.std(time_per_epoch)}')
-            all_validation_accuracies.append(torch.tensor(validation_accuracies))
-            # Print fold training time
-            end_time_fold = time.time()
-            elapsed_time_fold = end_time_fold - start_time_fold
-            print(f'Time taken for training in seed {args.seed}, fold {fold + 1}: {elapsed_time_fold:.2f} seconds, '
-                  f'Max Memory Allocated: {max_memory_allocated} MB | Max Memory Reserved: {max_memory_reserved} MB')
-            time_seed.append(elapsed_time_fold)
-        print("=" * 30)
-        average_validation_curve = torch.stack(all_validation_accuracies, dim=0)
-        acc_mean = average_validation_curve.mean(dim=0)
-        best_epoch = acc_mean.argmax().item()
-        best_epoch_mean = average_validation_curve[:, best_epoch].mean()
-        std_at_max_avg_validation_acc_epoch = average_validation_curve[:, best_epoch].std()
+        print(f'Average time per epoch in fold {fold + 1} and seed {args.seed}: {np.mean(time_per_epoch)}')
+        print(f'Std time per epoch in fold {fold + 1} and seed {args.seed}: {np.std(time_per_epoch)}')
+        all_validation_accuracies.append(torch.tensor(validation_accuracies))
+        # Print fold training time
+        end_time_fold = time.time()
+        elapsed_time_fold = end_time_fold - start_time_fold
+        print(f'Time taken for training in seed {args.seed}, fold {fold + 1}: {elapsed_time_fold:.2f} seconds, '
+              f'Max Memory Allocated: {max_memory_allocated} MB | Max Memory Reserved: {max_memory_reserved} MB')
+        time_seed.append(elapsed_time_fold)
+    print("=" * 30)
+    average_validation_curve = torch.stack(all_validation_accuracies, dim=0)
+    acc_mean = average_validation_curve.mean(dim=0)
+    best_epoch = acc_mean.argmax().item()
+    best_epoch_mean = average_validation_curve[:, best_epoch].mean()
+    std_at_max_avg_validation_acc_epoch = average_validation_curve[:, best_epoch].std()
 
-        print(f'Epoch {best_epoch + 1} got maximum averaged validation accuracy in seed {args.seed}: '
-              f'{best_epoch_mean}')
-        print(f'Standard Deviation for the results of epoch {best_epoch + 1} over all the folds '
-              f'in seed {args.seed}: {std_at_max_avg_validation_acc_epoch}')
-        print(f'Average total time taken for each fold in seed {args.seed}: {np.mean(time_seed)}')
-        print(f'STD total time taken for each fold in seed {args.seed}: {np.std(time_seed)}')
-        print(f'Average Time/Epoch in seed {args.seed}: {np.mean(time_per_epoch)}')
-        print(f'STD Time/Epoch in seed {args.seed}: {np.std(time_per_epoch)}')
-
-        wandb.log(
-            {"Test Accuracy": best_epoch_mean,
-             "Std": std_at_max_avg_validation_acc_epoch
-             })
+    print(f'Epoch {best_epoch + 1} got maximum averaged validation accuracy in seed {args.seed}: '
+          f'{best_epoch_mean}')
+    print(f'Standard Deviation for the results of epoch {best_epoch + 1} over all the folds '
+          f'in seed {args.seed}: {std_at_max_avg_validation_acc_epoch}')
+    print(f'Average total time taken for each fold in seed {args.seed}: {np.mean(time_seed)}')
+    print(f'STD total time taken for each fold in seed {args.seed}: {np.std(time_seed)}')
+    print(f'Average Time/Epoch in seed {args.seed}: {np.mean(time_per_epoch)}')
+    print(f'STD Time/Epoch in seed {args.seed}: {np.std(time_per_epoch)}')
 
 
 if __name__ == "__main__":
-    wandb.agent(sweep_id, main)
+    main()

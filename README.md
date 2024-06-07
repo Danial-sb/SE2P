@@ -27,12 +27,12 @@ To run SE2P configuration on the TU benchmark datasets run `SE2P.py`. You can sp
 - `dataset` - The dataset from the TU benchmark, including MUTAG, PROTEINS, PTC_GIN, IMDB-BINARY, IMDB-MULTI, and COLLAB.
 - `configuration` - Which configurations to select, options are c1, c2, c3, and c4.
 - `L` - The number of (virtual) layers in the diffusion step.  
-- `l_d` - Number of layers in the final MLP (decoder).
-- `l_p` - Number of layers in the MLP of the POOL function. Needed for c2, c3, and c4.
-- `D_mi` - Number of layers in the inner MLP of the DeepSet for the MERGE function. Needed for c3 and c4.
-- `D_mo` - Number of layers in the outer MLP of the DeepSet for the MERGE function. Needed for c3 and c4.
-- `D_ci` - Number of layers in the inner MLP of the DeepSet for the COMBINE function. Needed for c4.
-- `D_co` - Number of layers in the outer MLP of the DeepSet for the COMBINE function. Needed for c4.
+- `N_mlp` - Number of layers in the final MLP (decoder).
+- `N_pool` - Number of layers in the MLP of the POOL function. Needed for c2, c3, and c4.
+- `Ds_im` - Number of layers in the inner MLP of the DeepSet for the MERGE function. Needed for c3 and c4.
+- `Ds_om` - Number of layers in the outer MLP of the DeepSet for the MERGE function. Needed for c3 and c4.
+- `Ds_ic` - Number of layers in the inner MLP of the DeepSet for the COMBINE function. Needed for c4.
+- `Ds_oc` - Number of layers in the outer MLP of the DeepSet for the COMBINE function. Needed for c4.
 - `h` - The hidden dimentionality of the hidden layers.
 - `graph_pooling` - If set to "attention_agg", attentional aggregation will be used for the POOL function. In our experiments, "sum" is used.
 - `batch_size` - The batch size of the model.
@@ -46,7 +46,7 @@ To run SE2P on the OGB benchmark datasets, run OGBG.py. All the arguments are sa
 
 ## Acknowledgements
 
-The `DROPGNN.py`, which aims at reproducing the results of the DropGNN paper, is based on the this paper code by Paap et al. (https://github.com/KarolisMart/DropGNN)
+The `DROPGNN.py` file, which aims at reproducing the results of the DropGNN paper, is based on "Dropout Graph Neural Network" code by Papp et al. (https://github.com/KarolisMart/DropGNN)
 
 ## Citing Us/BibTex
 Please cite our work if you find it useful in any way.
