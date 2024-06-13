@@ -34,13 +34,14 @@ sweep_config = {
     "parameters": {
         "batch_size": {"values": [32]},
         "dropout": {"values": [0.5]},
-        "N_mlp": {"values": [2]},
-        "hidden_dim": {"values": [64]},
-        "N_pool": {"values": [1, 2, 3]},
-        "batch_norm": {"values": [True, False]},
+        "N_mlp": {"values": [1]},
+        "hidden_dim": {"values": [16]},
+        "N_pool": {"values": [2]},
+        "batch_norm": {"values": [True]},
+        "Ds_m": {"values": [0, 1, 2]},
     }
 }
-sweep_id = wandb.sweep(sweep_config, project="PTC-C2-Newest")
+sweep_id = wandb.sweep(sweep_config, project="MUTAG-C3-Newest")
 
 
 def separate_data(dataset_len: int, n_splits: int, seed: int) -> List[Tuple[np.ndarray, np.ndarray]]:
@@ -487,31 +488,31 @@ class SE2P_C2(nn.Module):
 
 
 class SE2P_C3(nn.Module):
-    def __init__(self, input_size: int, output_size: int, num_perturbations: int, device, args: Any,
+    def __init__(self, input_size: int, output_size: int, num_perturbations: int, device, args: Any, config: Any,
                  mlp_before_sum: bool = True):
         super(SE2P_C3, self).__init__()
 
         self.args = args
         self.mlp_before_sum = mlp_before_sum
         # MLP for individual perturbations
-        self.mlp_local = create_mlp(input_size, args.hidden_dim, args.Ds_im, args)
+        self.mlp_local = create_mlp(input_size, config.hidden_dim, config.Ds_m, args, config)
 
         # MLP for aggregation
-        self.mlp_global = create_mlp(args.hidden_dim, args.hidden_dim, args.Ds_om, args)
+        self.mlp_global = create_mlp(config.hidden_dim, config.hidden_dim, config.Ds_m, args, config)
 
         if mlp_before_sum:
-            self.mlp_before_sum = create_mlp(args.hidden_dim, args.hidden_dim, args.N_pool, args,
-                                             use_dropout=True)
+            self.mlp_before_sum = create_mlp(config.hidden_dim, config.hidden_dim, config.N_pool, args, config,
+                                             use_dropout=False)  # was true for previous experiments
 
         if self.args.graph_pooling == 'sum':
             self.pool = global_add_pool
         elif self.args.graph_pooling == 'attention_agg':
             self.pool = AttentionalAggregation(
-                gate_nn=torch.nn.Sequential(torch.nn.Linear(args.hidden_dim, 2 * args.hidden_dim),
-                                            torch.nn.BatchNorm1d(2 * args.hidden_dim), torch.nn.ReLU(),
-                                            torch.nn.Linear(2 * args.hidden_dim, 1)))
+                gate_nn=torch.nn.Sequential(torch.nn.Linear(config.hidden_dim, 2 * config.hidden_dim),
+                                            torch.nn.BatchNorm1d(2 * config.hidden_dim), torch.nn.ReLU(),
+                                            torch.nn.Linear(2 * config.hidden_dim, 1)))
 
-        self.decoder = Decoder(args.hidden_dim, output_size, args)
+        self.decoder = Decoder(config.hidden_dim, output_size, config)
 
         self.num_perturbations = num_perturbations
         self.device = device
@@ -771,7 +772,7 @@ def main(config=None):
 
         elif args.configuration == "c3":
             model = SE2P_C3(enriched_dataset.num_features, enriched_dataset.num_classes, num_perturbations, device,
-                            args).to(device)
+                            args, config).to(device)
 
         elif args.configuration == "c4":
             model = SE2P_C4(enriched_dataset.num_features, enriched_dataset.num_classes, num_perturbations, device,
