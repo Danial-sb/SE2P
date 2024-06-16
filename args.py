@@ -5,7 +5,7 @@ def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, choices=['MUTAG', 'IMDB-BINARY', 'IMDB-MULTI',
                                                         'PROTEINS', 'PTC_GIN', 'COLLAB', 'ogbg-molhiv',
-                                                        "ogbg-moltox21"], default='MUTAG')
+                                                        "ogbg-moltox21"], default='PROTEINS')
     parser.add_argument('--seed', type=int, default=0, help='seed for reproducibility')
     parser.add_argument('--lr', type=float, default=0.01, help='learning rate')
     parser.add_argument('--batch_size', type=int, default=64, choices=[32, 64, 256],
@@ -15,7 +15,7 @@ def get_args():
     parser.add_argument('--activation', type=str, default='ELU', choices=['ELU', 'ReLU'])
     parser.add_argument('--batch_norm', type=bool, default=True, help='whether to use batch normalization')
     parser.add_argument('--dropout', type=float, default=0.5, choices=[0.0, 0.5], help='dropout rate')
-    parser.add_argument('--configuration', type=str, default="c2",
+    parser.add_argument('--configuration', type=str, default="c1",
                         choices=["c1", "c2", "c3", "c4", "sign", "sgcn", 'GIN', 'GCN', 'DropGIN', 'DropGCN'],
                         help='which configuration to use')
     parser.add_argument('--n_f', type=int, default=1, choices=[1],

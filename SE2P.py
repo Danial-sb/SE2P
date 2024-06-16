@@ -349,63 +349,6 @@ class Decoder(nn.Module):
         return self.decoder(x)
 
 
-# class Decoder(nn.Module):
-#     def __init__(self, input_size, output_size, args: Any, batch_norm=False, dropout=True):
-#         super(Decoder, self).__init__()
-#
-#         layers = [nn.Linear(input_size, args.hidden_dim)]
-#
-#         if batch_norm:
-#             layers.append(nn.BatchNorm1d(args.hidden_dim))
-#
-#         if args.activation == 'ELU':
-#             layers.append(nn.ELU())
-#         else:
-#             layers.append(nn.ReLU())
-#
-#         if dropout:
-#             layers.append(nn.Dropout(args.dropout))
-#
-#         # Output layer
-#         layers.append(nn.Linear(args.hidden_dim, output_size))
-#
-#         self.decoder = nn.Sequential(*layers)
-#
-# def forward(self, x):
-#     return self.decoder(x)
-
-# class Decoder(nn.Module):
-#     def __init__(self, input_size, output_size, config, dropout=True):
-#         super(Decoder, self).__init__()
-#
-#         layers = [nn.Linear(input_size, config.hidden_dim)]
-#
-#         if config.batch_norm:
-#             layers.append(nn.BatchNorm1d(config.hidden_dim))
-#
-#         layers.append(nn.ELU())
-#
-#         if dropout:
-#             layers.append(nn.Dropout(config.dropout))
-#
-#         for _ in range(config.N_mlp - 1):
-#             layers.append(nn.Linear(config.hidden_dim, config.hidden_dim))
-#             if config.batch_norm:
-#                 layers.append(nn.BatchNorm1d(config.hidden_dim))
-#
-#             layers.append(nn.ELU())
-#
-#             if dropout:
-#                 layers.append(nn.Dropout(config.dropout))
-#
-#         layers.append(nn.Linear(config.hidden_dim, output_size))
-#
-#         self.decoder = nn.Sequential(*layers)
-#
-#     def forward(self, x):
-#         return self.decoder(x)
-
-
 class SE2P_C1(nn.Module):
     def __init__(self, input_dim: int, output_dim: int, args: Any):
         super(SE2P_C1, self).__init__()
