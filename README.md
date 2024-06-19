@@ -2,7 +2,7 @@ Scalable Expressiveness through Preprocessed Graph Perturbations (SE2P)
 ===============================================================================
 This is a pytorch implementation of the paper Scalable Expressiveness through Preprocessed Graph Perturbations.
 
-Please read our paper at
+Please read our paper at: https://arxiv.org/abs/2406.11714v1
 
 ## SE2P framework
 <img width="1260" alt="Screenshot 2023-01-28 at 3 19 09 PM" src="Figure/Figure_SE2P.jpg">
