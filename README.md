@@ -51,3 +51,11 @@ The `DROPGNN.py` file, which aims at reproducing the results of the DropGNN pape
 ## Citing Us/BibTex
 Please cite our work if you find it useful in any way.
 
+```
+@article{saber2024scalable,
+  title={Scalable Expressiveness through Preprocessed Graph Perturbations},
+  author={Saber, Danial and Salehi-Abari, Amirali},
+  journal={arXiv preprint arXiv:2406.11714},
+  year={2024}
+}
+```
